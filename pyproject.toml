@@ -1,0 +1,77 @@
+[project]
+name = "bulba1"
+version = "2.0.0"
+description = "Bulba 1"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.11.0",
+    "numpy>=2.0.0",
+    "tokenizers>=0.23.0",
+    "datasets>=4.8.0",
+    "rich>=15.0.0",
+    "textual>=8.0.0",
+    "tensorboard>=2.20.0",
+    "safetensors>=0.7.0",
+    "tqdm>=4.67.0",
+    "pyyaml>=6.0.0",
+    "psutil>=7.0.0",
+    "packaging>=24.0",
+    "bitsandbytes>=0.49.0",
+    "matplotlib>=3.10.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+]
+
+[project.scripts]
+bulba1 = "bulba1.cli:main"
+bulba = "bulba1.cli:main"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }
+triton = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.10.9",
+    "pandas>=3.0.2",
+    "python-telegram-bot>=22.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bulba1"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

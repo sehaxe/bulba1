@@ -1,0 +1,12 @@
+# Bot configuration (DO NOT COMMIT - secrets here)
+# Copy this file to bot_config.py and fill in your values
+
+# Your Telegram bot token from @BotFather
+BOT_TOKEN = ""  # e.g., "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+
+# Your Telegram user ID (from @userinfobot)
+# Add your ID, remove mine
+ADMIN_IDS = set()  # e.g., {5554531940}
+
+# Optional: Specific chat ID for one-way notifications
+# TELEGRAM_CHAT_ID = ""

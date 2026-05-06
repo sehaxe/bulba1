@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[oc]
+*.pyc
+build/
+dist/
+wheels/
+*.egg-info
+.venv/
+venv/
+env/
+
+# Checkpoints (too large for git)
+checkpoints/
+data/
+*.pt
+*.safetensors
+
+# Logs (runtime files)
+logs/
+*.log
+
+# Bot state
+events.json
+desired_config.json
+bot_config.py
+!telegram_bot/bot_config.py.example
+
+# Images
+*.png
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark
+benchmark_report.json
+
+*.lock
