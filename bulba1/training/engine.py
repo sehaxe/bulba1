@@ -519,10 +519,9 @@ class TrainingEngine:
                         if use_tui:
                             console.print(f"[yellow]Eval error: {e}. Continuing.[/yellow]")
 
-                if (step + 1) % log_every == 0:
+                if (step + 1) % checkpoint_every == 0:
                     elapsed = time.time() - self.start_time
                     tok_per_sec = self.tokens_processed / elapsed if elapsed > 0 else 0
-                    # Build full config for checkpoint (for resume verification)
                     train_config = {
                         "lr": lr,
                         "vram_pct": vram_pct,
@@ -548,6 +547,11 @@ class TrainingEngine:
                         config=train_config,
                         ema=self.ema,
                     )
+                    if use_tui:
+                        console.print(f"[green]Checkpoint saved at step {step + 1}[/green]")
+                if (step + 1) % log_every == 0:
+                    elapsed = time.time() - self.start_time
+                    tok_per_sec = self.tokens_processed / elapsed if elapsed > 0 else 0
                     if use_tui:
                         snap = self.monitor.snapshot(force=True)
                         table = Table(title=f"Step {step + 1}/{total_steps} — {stage.name()}")

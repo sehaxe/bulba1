@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/bulba1-python
-ExecStart=%h/bulba1-python/.venv/bin/python run_132m_12l.py
+ExecStart=%h/bulba1-python/.venv/bin/python run_225m.py
 Environment=PYTHONUNBUFFERED=1
 StandardOutput=append:%h/bulba1-python/logs/bulba1_225m.log
 StandardError=append:%h/bulba1-python/logs/bulba1_225m.log

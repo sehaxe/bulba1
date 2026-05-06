@@ -5,7 +5,7 @@
 ```
 bulba1-python/
 ├── bulba.py                    # Entry point
-├── run_132m_12l.py            # Main training script
+├── run_225m.py            # Main training script
 ├── pyproject.toml             # Dependencies
 │
 ├── bulba1/                    # Main package

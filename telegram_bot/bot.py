@@ -207,11 +207,18 @@ def get_gpu_info() -> str:
 
 
 def get_current_step() -> int:
-    """Get current training step via CLI"""
-    result = run_cli(["status"])
+    """Get current training step from log file"""
     try:
-        data = json.loads(result.stdout)
-        return data.get("step", 0)
+        if LOG_FILE.exists():
+            with open(LOG_FILE, "r") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                if "Step" in line and "/" in line:
+                    import re
+                    match = re.search(r"Step (\d+)/", line)
+                    if match:
+                        return int(match.group(1))
+        return 0
     except:
         return 0
 
@@ -256,8 +263,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/checkpoint - Latest checkpoint\n"
         "/eta - Time remaining\n"
         "/chat [msg] - Chat (3/day public)\n\n"
-        "Admin: /stop /train /restart /reset /quit /shutdown",
-        parse_mode="Markdown",
+        "Admin: /stop /train /restart /reset /quit /shutdown /pull /restart_bot",
     )
 
 
@@ -355,9 +361,8 @@ async def plot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎨 Generating plot...")
 
     try:
-        # Import log_viz functions
         sys.path.insert(0, str(PROJECT_ROOT))
-        from log_viz import parse_log, generate_plots
+        from tools.log_viz import parse_log, generate_plots
 
         if not LOG_FILE.exists():
             await update.message.reply_text("❌ Log file not found")
@@ -427,6 +432,38 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result = run_cli(["restart"])
     await update.message.reply_text("🔄 Training restarted")
+
+
+async def pull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Git pull latest code - admin only"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only")
+        return
+
+    await update.message.reply_text("📥 Pulling latest code...")
+    result = subprocess.run(
+        ["git", "pull", "origin", "master"],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        await update.message.reply_text(f"✅ Pulled:\n{result.stdout}")
+    else:
+        await update.message.reply_text(f"❌ Error:\n{result.stderr}")
+
+
+async def restart_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Restart bot service - admin only"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only")
+        return
+
+    await update.message.reply_text("🔄 Restarting bot...")
+    subprocess.run(["systemctl", "--user", "restart", "bulba1-bot"])
+    await update.message.reply_text("✅ Bot restarting...")
 
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -847,6 +884,8 @@ def main():
     app.add_handler(CommandHandler("config", config_command))
     app.add_handler(CommandHandler("chat", chat_command))
     app.add_handler(CommandHandler("quit", quit_command))
+    app.add_handler(CommandHandler("pull", pull_command))
+    app.add_handler(CommandHandler("restart_bot", restart_bot_command))
 
     # Confirmation handlers
     async def confirm_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):

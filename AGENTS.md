@@ -11,7 +11,7 @@ Autonomous LLM training in pure Python. 225M params, 16 layers. GPU: RTX 5060 Ti
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Run training | `run_132m_12l.py` | Main entry, 225M config |
+| Run training | `run_225m.py` | Main entry, 225M config |
 | CLI | `bulba1/cli.py` | Arguments, exports |
 | Model | `bulba1/model/` | 10 files - architecture |
 | Training loop | `bulba1/training/engine.py` | Training logic |
@@ -30,7 +30,7 @@ Autonomous LLM training in pure Python. 225M params, 16 layers. GPU: RTX 5060 Ti
 
 ```bash
 # Train 225M model
-python run_132m_12l.py
+python run_225m.py
 
 # CLI
 python bulba -p 225M -s 100000

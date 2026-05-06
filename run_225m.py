@@ -131,11 +131,23 @@ if resume_step == 0 and os.path.exists(LOG_FILE):
 
 print(f"Training for 100000 steps...")
 
+# Smart checkpoint interval: more frequent early, less later
+total_steps = 100000
+if total_steps <= 1000:
+    checkpoint_every = 100
+elif total_steps <= 10000:
+    checkpoint_every = 500
+else:
+    checkpoint_every = 1000
+log_every = 10  # Log status every 10 steps
+
+print(f"Checkpoint every {checkpoint_every} steps, log every {log_every} steps")
+
 model = engine.train(
     infinite_loader(),
-    100000,
-    checkpoint_every=cfg.checkpoint_every,
-    log_every=10,
+    total_steps,
+    checkpoint_every=checkpoint_every,
+    log_every=log_every,
     eval_every=5000,
     resume_step=resume_step,
 )

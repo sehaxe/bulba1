@@ -4,12 +4,14 @@ Memory-efficient: uses pyarrow memory_map to avoid RAM pressure."""
 
 import os, sys, json, glob
 
-HDD = "/mnt/e43497ab-0ff2-45b4-b45f-28de3339a53e/bulba1-data"
-TMP = os.path.join(HDD, "tmp")
-RAW = os.path.join(HDD, "raw")
-TRAIN = "/home/sehaxe/bulba1-python/data/train"
-os.makedirs(RAW, exist_ok=True)
-os.makedirs(TRAIN, exist_ok=True)
+HDD = os.environ.get("BULBA1_DATA", "/mnt/e43497ab-0ff2-45b4-b45f-28de3339a53e/bulba1-data")
+TRAIN = os.environ.get("BULBA1_TRAIN", "data/train")
+TMP = os.path.join(HDD, "tmp") if os.path.exists(HDD) else "data/tmp"
+RAW = os.path.join(HDD, "raw") if os.path.exists(HDD) else "data/raw"
+
+if os.path.exists(HDD):
+    os.makedirs(RAW, exist_ok=True)
+    os.makedirs(TMP, exist_ok=True)
 
 
 def extract_parquet(src, dst_name, max_gb=15):

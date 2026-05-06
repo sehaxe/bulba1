@@ -23,8 +23,10 @@ logs/
 # Bot state
 events.json
 desired_config.json
-bot_config.py
-!telegram_bot/bot_config.py.example
+
+# Telegram bot secrets (NOT in git)
+telegram_bot/bot_config.py
+!telegram_bot/bot_configpy.example
 
 # Images
 *.png
