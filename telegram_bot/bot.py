@@ -11,6 +11,7 @@ import argparse
 import subprocess
 import json
 import time
+import signal
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -51,6 +52,9 @@ RATE_LIMIT_MAX_COMMANDS = 10  # max commands per window
 RATE_LIMIT_PLOT_MAX = 2  # max /plot per window (expensive)
 command_history = {}  # user_id -> [(timestamp, command)]
 
+# Chat conversation state
+chat_state = {}  # user_id -> {"step": "awaiting_checkpoint" | "awaiting_prompt", "checkpoint": N}
+
 # Load config - prefer bot_config.py, fall back to env vars
 try:
     from bot_config import BOT_TOKEN, ADMIN_IDS
@@ -73,7 +77,6 @@ def get_main_keyboard(is_admin_user: bool = False) -> InlineKeyboardMarkup:
     """Get main keyboard with buttons"""
     keyboard = [
         [
-            InlineKeyboardButton("📊 Status", callback_data="status"),
             InlineKeyboardButton("🎮 GPU", callback_data="gpu"),
         ],
         [
@@ -95,9 +98,12 @@ def get_main_keyboard(is_admin_user: bool = False) -> InlineKeyboardMarkup:
                 ],
                 [
                     InlineKeyboardButton("🔄 Restart", callback_data="restart"),
-                    InlineKeyboardButton("🗑 Reset", callback_data="reset"),
+                    InlineKeyboardButton("💾 Save Checkpoint", callback_data="save_checkpoint"),
                 ],
-                [InlineKeyboardButton("🛑 Off", callback_data="shutdown")],
+                [
+                    InlineKeyboardButton("🗑 Reset", callback_data="reset"),
+                    InlineKeyboardButton("🛑 Off", callback_data="shutdown"),
+                ],
             ]
         )
     return InlineKeyboardMarkup(keyboard)
@@ -122,9 +128,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     # Route to appropriate handler
-    if data == "status":
-        await status_command(update, context)
-    elif data == "logs":
+    if data == "logs":
         await logs_command(update, context)
     elif data == "plot":
         await plot_command(update, context)
@@ -144,6 +148,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await system_info_command(update, context)
     elif data == "eta":
         await eta_command(update, context)
+    elif data == "save_checkpoint":
+        await save_checkpoint_command(update, context)
     elif data == "shutdown":
         await shutdown_command(update, context)
 
@@ -251,20 +257,48 @@ def get_latest_checkpoint() -> str:
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command"""
-    await update.message.reply_text(
-        "🚀 *Bulba1 Bot*\n\n"
-        "Commands:\n"
-        "/status - Training status\n"
-        "/gpu - GPU info\n"
-        "/system - System info\n"
-        "/logs - Last log lines\n"
-        "/plot - Training graph\n"
-        "/checkpoint - Latest checkpoint\n"
-        "/eta - Time remaining\n"
-        "/chat [msg] - Chat (3/day public)\n\n"
-        "Admin: /stop /train /restart /reset /quit /shutdown /pull /restart_bot",
-    )
+    user_id = update.effective_user.id
+    is_admin_user = is_admin(user_id)
+
+    msg = """🚀 *Bulba1 Bot*
+
+📊 *Status*
+/gpu - GPU utilization & memory
+/system - CPU, RAM, Disk
+/eta - Time remaining
+/checkpoint - Latest save
+
+📜 *Logs*
+/logs [n] - Last n lines (default 10)
+/plot - Training loss graph
+
+💬 *Chat*
+/chat [text] - Generate response (3/day)"""
+
+    if is_admin_user:
+        msg += """
+
+🔧 *Admin*
+▶️ /train - Start training
+⏹️ /stop - Stop training
+⏸️ /pause - Pause training
+▶️ /resume - Resume training
+🔄 /restart - Restart training
+💾 /save - Save checkpoint now
+🗑️ /cleanup - Delete old checkpoints
+🗑️ /reset - Reset from step 0
+📥 /pull - Pull latest code
+⏰ /schedule [time] - Schedule start
+⚙️ /config - Set parameters
+📤 /download - Send checkpoint
+📦 /export_hf - Export HF format
+
+🛑 *System*
+/quit - Stop training & disconnect
+/shutdown - Power off machine
+/restart_bot - Restart bot"""
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -419,8 +453,70 @@ async def train_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Admin only")
         return
 
-    result = run_cli(["start"])
-    await update.message.reply_text("▶ Training started")
+    # Use systemd to start training
+    result = subprocess.run(["systemctl", "--user", "start", "bulba1-225m"], capture_output=True, text=True)
+    if result.returncode == 0:
+        await update.message.reply_text("▶ Training started")
+    else:
+        await update.message.reply_text(f"❌ Error: {result.stderr}")
+
+
+async def save_checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save checkpoint - admin only"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only")
+        return
+
+    await update.message.reply_text("💾 Saving checkpoint...")
+
+    # Find main training process (parent of worker processes)
+    result = subprocess.run(
+        ["pgrep", "-f", "run_225m.py"],
+        capture_output=True,
+        text=True,
+    )
+    pids = result.stdout.strip().split("\n") if result.stdout.strip() else []
+    if not pids:
+        await update.message.reply_text("❌ Training not running")
+        return
+
+    main_pid = pids[0]
+    os.kill(int(main_pid), signal.SIGUSR1)
+
+    await update.message.reply_text("✅ Checkpoint saved!")
+
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cleanup old checkpoints - admin only"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only")
+        return
+
+    if not CHECKPOINT_DIR.exists():
+        await update.message.reply_text("❌ No checkpoint directory")
+        return
+
+    files = sorted(CHECKPOINT_DIR.glob("checkpoint_*.safetensors"), key=lambda f: f.stat().st_mtime)
+    if not files:
+        await update.message.reply_text("✅ No checkpoints to clean")
+        return
+
+    keep_top = 3
+    to_delete = files[:-keep_top] if len(files) > keep_top else []
+    freed = 0
+    for f in to_delete:
+        size_mb = f.stat().st_size / 1024 / 1024
+        f.unlink()
+        for ext in [".json", "_optimizer.pt"]:
+            companion = f.with_name(f.name.replace(".safetensors", ext))
+            if companion.exists():
+                companion.unlink()
+        freed += size_mb
+
+    remaining = len(files) - len(to_delete)
+    await update.message.reply_text(f"🗑️ Cleaned {len(to_delete)} checkpoints\nFreed: {freed:.1f} MB\nRemaining: {remaining}")
 
 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -430,8 +526,39 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Admin only")
         return
 
-    result = run_cli(["restart"])
-    await update.message.reply_text("🔄 Training restarted")
+    result = subprocess.run(["systemctl", "--user", "restart", "bulba1-225m"], capture_output=True, text=True)
+    if result.returncode == 0:
+        await update.message.reply_text("🔄 Training restarted")
+    else:
+        await update.message.reply_text(f"❌ Error: {result.stderr}")
+
+
+async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pause training - admin only"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only")
+        return
+
+    result = subprocess.run(["pkill", "-STOP", "-f", "run_225m.py"], capture_output=True, text=True)
+    if result.returncode == 0:
+        await update.message.reply_text("⏸ Training paused\n\nUse /resume to continue")
+    else:
+        await update.message.reply_text("❌ Could not pause (training may not be running)")
+
+
+async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resume training - admin only"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only")
+        return
+
+    result = subprocess.run(["pkill", "-CONT", "-f", "run_225m.py"], capture_output=True, text=True)
+    if result.returncode == 0:
+        await update.message.reply_text("▶ Training resumed")
+    else:
+        await update.message.reply_text("❌ Could not resume")
 
 
 async def pull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -520,16 +647,22 @@ async def gpu_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         name, util, temp, mem_used, mem_total, power = result.stdout.strip().split(",")
 
-        msg = f"🎮 *GPU Info*\n\n"
-        msg += f"Name: `{name.strip()}`\n"
-        msg += f"Util: `{util.strip()}`\n"
-        msg += f"Temp: `{temp.strip()}°C`\n"
-        msg += f"Memory: `{mem_used.strip()}/{mem_total.strip()} MB`\n"
-        msg += f"Power: `{power.strip()} W`"
+        name = name.strip()
+        util = util.strip().replace(" %", "%")
+        temp = temp.strip()
+        mem_used = mem_used.strip().replace(" MiB", "").replace("MiB", "")
+        mem_total = mem_total.strip().replace(" MiB", "").replace("MiB", "")
+        power = power.strip().replace(" W", "W").replace("W", "W")
 
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        msg = f"GPU: {name}\n"
+        msg += f"Util: {util}\n"
+        msg += f"Temp: {temp}C\n"
+        msg += f"VRAM: {mem_used}/{mem_total}MB\n"
+        msg += f"Power: {power}"
+
+        await update.message.reply_text(msg)
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"Error: {e}")
 
 
 async def system_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -671,20 +804,31 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    valid_keys = {"batch_size", "lr", "learning_rate", "seq_len", "weight_decay"}
+    updates = {}
     for arg in args:
         if "=" in arg:
             key, val = arg.split("=", 1)
+            if key not in valid_keys:
+                await update.message.reply_text(f"❌ Invalid key: {key}\nValid: {', '.join(valid_keys)}")
+                return
             try:
                 if "." in val:
-                    value = float(val)
+                    updates[key] = float(val)
                 else:
-                    value = int(val)
-                result = run_cli(["config", "--key", key, "--value", str(value)])
-            except:
+                    updates[key] = int(val)
+            except ValueError:
                 await update.message.reply_text(f"❌ Invalid value: {val}")
                 return
 
-    msg = "✅ *Config updated*\n\n" + " ".join(args) + "\nWill apply on restart"
+    if not updates:
+        await update.message.reply_text("⚙️ *Remote Config*\n\nUsage: /config batch_size=5 lr=1e-4\n\nValid: batch_size, lr, seq_len, weight_decay", parse_mode="Markdown")
+        return
+
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(updates, f, indent=2)
+
+    msg = "✅ *Config updated*\n\n" + "\n".join(f"`{k}` = {v}" for k, v in updates.items()) + "\n\nWill apply on restart"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
@@ -717,11 +861,10 @@ def check_chat_limit(user_id: int) -> tuple[bool, int]:
 
 
 async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Chat with the model - limited for public"""
+    """Chat with the model - interactive checkpoint selection"""
     user_id = update.effective_user.id
     is_admin_user = is_admin(user_id)
 
-    # Check rate limit for non-admins
     if not is_admin_user:
         allowed, remaining = check_chat_limit(user_id)
         if not allowed:
@@ -730,33 +873,79 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
             return
-        await update.message.reply_text(f"💬 ({remaining} left today)")
 
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /chat [your message]")
+    checkpoints = sorted(CHECKPOINT_DIR.glob("checkpoint_step_*.safetensors")) if CHECKPOINT_DIR.exists() else []
+
+    if not checkpoints:
+        await update.message.reply_text("No checkpoints available yet. Train longer to get first checkpoint.")
         return
 
-    prompt = " ".join(args)
+    checkpoint_steps = []
+    for f in checkpoints:
+        step = int(f.name.split("_")[-1].replace(".safetensors", ""))
+        checkpoint_steps.append(step)
+    checkpoint_steps.sort()
 
-    # Check if training is active
-    training_active = get_service_status() == "active"
-    mode_msg = " (CPU mode - training active)" if training_active else ""
-    await update.message.reply_text(f"💬 Thinking{mode_msg}...")
+    if user_id in chat_state and chat_state[user_id].get("step") == "awaiting_prompt":
+        del chat_state[user_id]
 
-    result = run_cli(["generate", "--prompt", prompt, "--tokens", "100"], timeout=180)
+    chat_state[user_id] = {"step": "awaiting_checkpoint", "checkpoints": checkpoint_steps}
 
-    try:
-        data = json.loads(result.stdout)
-        if "error" in data:
-            await update.message.reply_text(f"❌ {data['error']}")
-        else:
-            await update.message.reply_text(
-                f"📝 *You:* {prompt}\n\n💬 *Bot:*\n{data.get('output', 'N/A')}",
-                parse_mode="Markdown",
-            )
-    except:
-        await update.message.reply_text(f"❌ Error")
+    options = "\n".join([f"{i+1}. Step {s}" for i, s in enumerate(checkpoint_steps)])
+    await update.message.reply_text(
+        f"Select checkpoint:\n\n{options}\n\nOr type a step number (1-{len(checkpoint_steps)})"
+    )
+
+
+async def handle_chat_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle non-command text for chat flow"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if user_id not in chat_state:
+        return
+
+    state = chat_state[user_id]
+
+    if state.get("step") == "awaiting_checkpoint":
+        try:
+            idx = int(text) - 1
+            checkpoints = state["checkpoints"]
+            if idx < 0 or idx >= len(checkpoints):
+                await update.message.reply_text(f"Invalid. Type 1-{len(checkpoints)}")
+                return
+
+            state["step"] = "awaiting_prompt"
+            state["checkpoint"] = checkpoints[idx]
+            await update.message.reply_text(f"Checkpoint {checkpoints[idx]} selected.\n\nNow type your message:")
+        except ValueError:
+            await update.message.reply_text("Invalid. Type a number.")
+
+    elif state.get("step") == "awaiting_prompt":
+        checkpoint = state.get("checkpoint")
+        prompt = text
+        del chat_state[user_id]
+
+        await update.message.reply_text(f"Thinking...")
+
+        training_active = get_service_status() == "active"
+        device_flag = [] if not training_active else ["--device", "cpu"]
+
+        result = run_cli(["--steps", "0", "--generate", "--prompt", prompt, "--gen-max-tokens", "100", "--checkpoint", str(checkpoint), "--resume"] + device_flag, timeout=180)
+
+        try:
+            output = None
+            for line in result.stdout.strip().split("\n"):
+                if "Generated:" in line:
+                    output = line.split("Generated:", 1)[1].strip()
+            if output:
+                await update.message.reply_text(f"Bot: {output}")
+            else:
+                await update.message.reply_text(f"Error: {result.stderr[:200]}")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+    else:
+        await update.message.reply_text("Use /chat to start conversation")
 
 
 async def quit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -866,7 +1055,6 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("panel", panel_command))
-    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("plot", plot_command))
     app.add_handler(CommandHandler("checkpoint", checkpoint_command))
@@ -886,24 +1074,36 @@ def main():
     app.add_handler(CommandHandler("quit", quit_command))
     app.add_handler(CommandHandler("pull", pull_command))
     app.add_handler(CommandHandler("restart_bot", restart_bot_command))
+    app.add_handler(CommandHandler("save", save_checkpoint_command))
+    app.add_handler(CommandHandler("schedule", schedule_command))
+    app.add_handler(CommandHandler("pause", pause_command))
+    app.add_handler(CommandHandler("resume", resume_command))
+    app.add_handler(CommandHandler("cleanup", cleanup_command))
 
     # Confirmation handlers
     async def confirm_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(update.effective_user.id):
             return
-        result = run_cli(["stop"])
+        result = subprocess.run(["systemctl", "--user", "stop", "bulba1-225m"], capture_output=True, text=True)
         await update.message.reply_text("⏹ Training stopped")
 
     async def confirm_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(update.effective_user.id):
             return
-        result = run_cli(["reset"])
-        await update.message.reply_text("🗑 Reset! Training from step 0")
+        subprocess.run(["systemctl", "--user", "stop", "bulba1-225m"], capture_output=True)
+        if CHECKPOINT_DIR.exists():
+            for f in CHECKPOINT_DIR.glob("checkpoint_*"):
+                f.unlink()
+            for f in CHECKPOINT_DIR.glob("*.pt"):
+                f.unlink()
+        if LOG_FILE.exists():
+            open(LOG_FILE, "w").close()
+        await update.message.reply_text("🗑 Reset! Training from step 0\n\nUse /train to start fresh")
 
     async def confirm_quit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(update.effective_user.id):
             return
-        subprocess.run(["systemctl", "--user", "stop", "bulba1"])
+        subprocess.run(["systemctl", "--user", "stop", "bulba1-225m"])
         await update.message.reply_text("🛑 Stopped. Bye!")
 
     app.add_handler(CommandHandler("confirm_stop", confirm_stop))
@@ -913,11 +1113,11 @@ def main():
     app.add_handler(CommandHandler("download", download_command))
     app.add_handler(CommandHandler("export_hf", export_hf_command))
     app.add_handler(CommandHandler("schedule", schedule_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_input))
 
     print(f"🤖 Bulba1 Bot started! (config: {_config_loaded})")
-    print(f"Commands: /start, /status, /logs, /plot, /checkpoint, /chat, /help")
-    print(f"Admin: /stop, /train, /restart, /reset, /quit, /shutdown")
+    print(f"Commands: /start, /logs, /plot, /checkpoint, /gpu, /system, /eta, /chat")
+    print(f"Admin: /train, /stop, /restart, /save, /reset, /pull, /config, /schedule, /download, /export_hf, /quit, /shutdown")
 
     if chat_id:
         # One-way mode: just send startup message and exit
@@ -925,7 +1125,7 @@ def main():
 
         async def send_startup():
             await app.bot.send_message(
-                chat_id=chat_id, text="🚀 Bulba1 Bot connected!\nUse /status to check training."
+                chat_id=chat_id, text="🚀 Bulba1 Bot connected!\nUse /gpu or /eta to check training."
             )
 
         asyncio.run(send_startup())

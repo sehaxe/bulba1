@@ -1,9 +1,27 @@
-import os, sys, torch
+import os, sys, torch, signal
 
 os.chdir("/home/sehaxe/bulba1-python")
 sys.path.insert(0, os.getcwd())
 
 LOG_FILE = "logs/bulba1_225m.log"
+CHECKPOINT_TRIGGER = "logs/save_checkpoint.trigger"
+
+# Signal handler for manual checkpoint save
+_engine = None
+def set_engine(e):
+    global _engine
+    _engine = e
+
+def save_checkpoint_handler(signum, frame):
+    global _engine
+    if _engine is not None and hasattr(_engine, 'checkpoint_mgr'):
+        step = _engine.step
+        print(f"\n[MANUAL SAVE] Saving checkpoint at step {step}...", flush=True)
+        loss = _engine.loss_val if hasattr(_engine, 'loss_val') else 0.0
+        _engine.checkpoint_mgr.save(_engine.model, _engine.optimizer, step, loss)
+        print(f"[MANUAL SAVE] Done!\n", flush=True)
+
+signal.signal(signal.SIGUSR1, save_checkpoint_handler)
 
 from bulba1.utils.config import ModelConfig
 from bulba1.model.minichat import MiniChat
@@ -42,6 +60,17 @@ cfg = ModelConfig(
     vram_critical_pct=95,
 )
 
+CONFIG_FILE = "logs/desired_config.json"
+if os.path.exists(CONFIG_FILE):
+    import json
+    with open(CONFIG_FILE) as f:
+        remote = json.load(f)
+    for key, val in remote.items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, val)
+            print(f"Applied remote config: {key}={val}")
+    os.remove(CONFIG_FILE)
+
 device = torch.device("cuda")
 tokenizer = FastTokenizer("data/tokenizer_fast.json")
 tokenizer.load()
@@ -62,6 +91,7 @@ def infinite_loader():
 
 model = MiniChat(cfg).to(device)
 engine = TrainingEngine(model, cfg, tokenizer, device=device, tuned_config=None)
+set_engine(engine)
 
 total_params = sum(p.numel() for p in model.parameters())
 print(f"Model: {total_params / 1e6:.1f}M params, d_model={cfg.d_model}, n_layers={cfg.n_layers}")

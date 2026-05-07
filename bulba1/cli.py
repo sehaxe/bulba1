@@ -67,6 +67,7 @@ def main():
         help="Prompts for generation eval",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--checkpoint", type=int, default=0, help="Resume from specific checkpoint step (0=latest)")
     parser.add_argument(
         "--analyze", action="store_true", help="Run hardware + dataset analysis and exit"
     )
@@ -434,8 +435,9 @@ def main():
         )
 
     resume_step = 0
-    if args.resume:
-        resume_step = engine.resume_from_checkpoint("latest")
+    if args.resume or args.checkpoint > 0:
+        checkpoint_arg = args.checkpoint if args.checkpoint > 0 else "latest"
+        resume_step = engine.resume_from_checkpoint(checkpoint_arg)
 
     print(f"Starting training for {args.steps} steps...")
     model = engine.train(

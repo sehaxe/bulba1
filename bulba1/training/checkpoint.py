@@ -71,8 +71,11 @@ class CheckpointManager:
     def load(self, model: nn.Module, path: str, optimizer=None, ema=None):
         if path == "best":
             path = os.path.join(self.checkpoint_dir, "best.safetensors")
-        if path == "latest" or not path:
+        elif path == "latest" or not path:
             path = self.find_latest()
+        elif isinstance(path, int) or (isinstance(path, str) and path.isdigit()):
+            step = int(path)
+            path = os.path.join(self.checkpoint_dir, f"checkpoint_step_{step}.safetensors")
         if not path or not os.path.exists(path):
             return None
         state_dict = load_file(path)
