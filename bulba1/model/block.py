@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 from bulba1.model.diff_attn import DiffAttention, RMSNorm
 from bulba1.model.moe import MoELayer
-from bulba1.model.mamba import Mamba2SSD
+from bulba1.model.mamba import MambaBlock
 from bulba1.model.kda import KimiDeltaAttention
-
+from bulba1.model.bit_linear import q_int4_v2, hadamard_transform
 
 class Block(nn.Module):
     def __init__(self, cfg, layer_idx: int = 0):
@@ -30,13 +30,30 @@ class Block(nn.Module):
                 self.moe = MoELayer(cfg, layer_idx)
         else:
             self.norm1 = RMSNorm(cfg.d_model)
-            self.mamba = Mamba2SSD(cfg)
+            if cfg.use_mamba:
+                self.mamba = MambaBlock(cfg)
+
+        self.use_mhc = getattr(cfg, "use_mhc", True)
+        if self.use_mhc:
+            from bulba1.model.mhc import MHC
+            self.mhc = MHC(cfg.d_model)
+        else:
+            self.mhc = None
+
+        self.use_bitnet_a48 = getattr(cfg, "use_bitnet_a48", True)
+        if self.use_bitnet_a48:
+            self.a48_topk = getattr(cfg, "a48_attn_topk_sparsity", 0.5)
 
     def forward(self, x: torch.Tensor, prev_experts=None, past_kv=None):
         h = x
 
+        if self.use_bitnet_a48:
+            h = q_int4_v2(hadamard_transform(h))
+
         if self.is_attn_block:
             attn_out, new_kv, attn_z = self.attn(self.norm1(h), past_kv=past_kv)
+            if self.use_bitnet_a48:
+                attn_out = topk_sparsify(attn_out, self.a48_topk)
             h = h + attn_out
 
             if self.cfg.use_moe:
@@ -48,8 +65,17 @@ class Block(nn.Module):
             h = h + moe_out
             total_aux = aux_loss + attn_z * getattr(self.cfg, "attn_z_loss_coef", 0.0001)
         else:
-            h = h + self.mamba(self.norm1(h))
+            if hasattr(self, 'mamba'):
+                mamba_out = self.mamba(self.norm1(h))
+            else:
+                mamba_out = torch.zeros_like(h)
+            if self.use_bitnet_a48:
+                mamba_out = topk_sparsify(mamba_out, self.a48_topk)
+            h = h + mamba_out
             total_aux = torch.tensor(0.0, device=x.device, dtype=x.dtype)
             new_kv = None
+
+        if self.mhc is not None:
+            h = self.mhc(h)
 
         return h, total_aux, new_kv

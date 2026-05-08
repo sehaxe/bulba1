@@ -19,6 +19,17 @@ class ModelConfig:
     rex_reuse_weight: float = 0.3
     num_shared_experts: int = 2
 
+    # ── KDA enhancements ─────────────────────────────────────────
+    kda_use_rope: bool = False
+    kda_double_gate: bool = False
+
+    # ── MoE expert choice ───────────────────────────────────────
+    use_expert_choice: bool = False
+    expert_choice_capacity: int = 0  # 0 = auto
+
+    # ── Compile model ───────────────────────────────────────────
+    compile_model: bool = False  # если хотим обернуть всю модель в torch.compile
+
     # Attention
     use_diff_attn: bool = True
     use_mla: bool = True
@@ -40,7 +51,8 @@ class ModelConfig:
 
     alternating_pattern: Optional[List[str]] = None
     attn_every_n_layers: int = 4
-    use_kda: bool = False
+    use_kda: bool = True
+    kda_use_parallel_scan: bool = True
     kda_gate_dim: int = 16
 
     # MHC

@@ -856,16 +856,16 @@ def main():
     os.chdir(d)
     sys.path.insert(0, d)
 
-    from bulba1.utils.config import ModelConfig
+    from bulba1.config import ModelConfig
     from bulba1.model.minichat import MiniChat
 
     if os.path.exists(args.tokenizer):
-        from bulba1.data.tokenizer import FastTokenizer
+        from bulba1.tokenizer import FastTokenizer
 
         tokenizer = FastTokenizer(args.tokenizer)
         tokenizer.load()
     else:
-        from bulba1.data.tokenizer import HFTokenizer
+        from bulba1.tokenizer import HFTokenizer
 
         tokenizer = HFTokenizer(vocab_size=12000)
         tokenizer.load()

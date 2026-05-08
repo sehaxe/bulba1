@@ -73,6 +73,9 @@ class DiffAttention(nn.Module):
         if cfg.use_per_head_gating:
             self.head_gates = nn.Parameter(torch.ones(cfg.n_heads))
 
+        self.use_quantized_kv_cache = getattr(cfg, "use_quantized_kv_cache", True)
+        self.kv_cache_bits = getattr(cfg, "kv_cache_bits", 3)
+
         self.rope = RoPE(self.head_dim, cfg.max_ctx_len, cfg.rope_theta)
         self.register_buffer("lambda_val", torch.tensor(self.lambda_init))
 
@@ -100,6 +103,10 @@ class DiffAttention(nn.Module):
         if self.cfg.use_qk_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)
+
+        if self.use_quantized_kv_cache:
+            k = quantize_ste_absmax(k, self.kv_cache_bits)
+            v = quantize_ste_absmax(v, self.kv_cache_bits)
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)

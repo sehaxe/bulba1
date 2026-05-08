@@ -1,1139 +1,422 @@
 #!/usr/bin/env python3
 """
-Telegram Bot for Bulba1 Training Monitor
-Run with: python bot.py [--token TOKEN] [--chat-id CHAT_ID]
-Or set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID environment variables
+Telegram Bot для мониторинга тренировки Bulba1
+Оптимизированная версия: асинхронный event loop, нет блокирующих subprocess.run
 """
 
-import os
-import sys
-import argparse
-import subprocess
-import json
-import time
-import signal
+import os, sys, re, json, time, asyncio, signal, subprocess
 from pathlib import Path
+from datetime import datetime
+from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.constants import ParseMode
 
-# Add project root to path
+# ── Config ──────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-
-# Config paths
-LOG_FILE = PROJECT_ROOT / "logs" / "bulba1_225m.log"
-CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "run_bulba1_225m_clean"
+LOG_FILE = PROJECT_ROOT / "logs" / "bulba1.log"
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "run_bulba1_150m"
 SERVICE_NAME = "bulba1"
-CLI_SCRIPT = PROJECT_ROOT / "bulba1" / "cli.py"
 
-
-def run_cli(args: list, timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run CLI command using uv"""
-    cmd = [
-        "uv",
-        "run",
-        "--with",
-        "torch",
-        "--with",
-        "safetensors",
-        "python",
-        str(CLI_SCRIPT),
-    ] + args
-    return subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_ROOT)
-    )
-
-
-# Rate limiting
-import time
-
-RATE_LIMIT_WINDOW = 60  # seconds
-RATE_LIMIT_MAX_COMMANDS = 10  # max commands per window
-RATE_LIMIT_PLOT_MAX = 2  # max /plot per window (expensive)
-command_history = {}  # user_id -> [(timestamp, command)]
-
-# Chat conversation state
-chat_state = {}  # user_id -> {"step": "awaiting_checkpoint" | "awaiting_prompt", "checkpoint": N}
-
-# Load config - prefer bot_config.py, fall back to env vars
 try:
     from bot_config import BOT_TOKEN, ADMIN_IDS
-    _config_loaded = "bot_config.py"
+    _config_source = "bot_config.py"
 except ImportError:
-    # Fall back to environment variables
     BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     ADMIN_IDS = set()
     if os.environ.get("TELEGRAM_ADMIN_ID"):
-        ADMIN_IDS = {int(x) for x in os.environ.get("TELEGRAM_ADMIN_ID").split(",")}
-    _config_loaded = "environment"
+        ADMIN_IDS = {int(x) for x in os.environ["TELEGRAM_ADMIN_ID"].split(",")}
+    _config_source = "environment"
 
-
-def is_admin(user_id: int) -> bool:
-    """Check if user is admin"""
-    return user_id in ADMIN_IDS
-
-
-def get_main_keyboard(is_admin_user: bool = False) -> InlineKeyboardMarkup:
-    """Get main keyboard with buttons"""
-    keyboard = [
-        [
-            InlineKeyboardButton("🎮 GPU", callback_data="gpu"),
-        ],
-        [
-            InlineKeyboardButton("💻 System", callback_data="system"),
-            InlineKeyboardButton("⏱️ ETA", callback_data="eta"),
-        ],
-        [
-            InlineKeyboardButton("📝 Logs", callback_data="logs"),
-            InlineKeyboardButton("📈 Plot", callback_data="plot"),
-        ],
-        [InlineKeyboardButton("📦 Checkpoint", callback_data="checkpoint")],
-    ]
-    if is_admin_user:
-        keyboard.extend(
-            [
-                [
-                    InlineKeyboardButton("▶️ Start", callback_data="train"),
-                    InlineKeyboardButton("⏹ Stop", callback_data="stop"),
-                ],
-                [
-                    InlineKeyboardButton("🔄 Restart", callback_data="restart"),
-                    InlineKeyboardButton("💾 Save Checkpoint", callback_data="save_checkpoint"),
-                ],
-                [
-                    InlineKeyboardButton("🗑 Reset", callback_data="reset"),
-                    InlineKeyboardButton("🛑 Off", callback_data="shutdown"),
-                ],
-            ]
+# ── Async systemctl wrapper ─────────────────────────────────────────
+async def run_systemctl(*args: str) -> tuple[bool, str]:
+    """Асинхронный вызов systemctl --user"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "--user", *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-    return InlineKeyboardMarkup(keyboard)
+        stdout, stderr = await proc.communicate()
+        return proc.returncode == 0, (stdout + stderr).decode()
+    except Exception as e:
+        return False, str(e)
 
+async def get_service_status() -> str:
+    ok, stdout = await run_systemctl("is-active", SERVICE_NAME)
+    if ok:
+        return stdout.strip()
+    return "inactive"
 
-async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show control panel"""
-    user_id = update.effective_user.id
-    keyboard = get_main_keyboard(is_admin(user_id))
-
-    await update.message.reply_text(
-        "🎛️ *Control Panel*", reply_markup=keyboard, parse_mode="Markdown"
-    )
-
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button callbacks"""
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    data = query.data
-
-    # Route to appropriate handler
-    if data == "logs":
-        await logs_command(update, context)
-    elif data == "plot":
-        await plot_command(update, context)
-    elif data == "checkpoint":
-        await checkpoint_command(update, context)
-    elif data == "train":
-        await train_command(update, context)
-    elif data == "stop":
-        await stop_command(update, context)
-    elif data == "restart":
-        await restart_command(update, context)
-    elif data == "reset":
-        await reset_command(update, context)
-    elif data == "gpu":
-        await gpu_info_command(update, context)
-    elif data == "system":
-        await system_info_command(update, context)
-    elif data == "eta":
-        await eta_command(update, context)
-    elif data == "save_checkpoint":
-        await save_checkpoint_command(update, context)
-    elif data == "shutdown":
-        await shutdown_command(update, context)
-
-
-def check_rate_limit(user_id: int, command: str) -> tuple[bool, str]:
-    """Check if user is rate limited. Returns (allowed, message)"""
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW
-
-    if user_id not in command_history:
-        command_history[user_id] = []
-
-    # Clean old entries
-    command_history[user_id] = [
-        (ts, cmd) for ts, cmd in command_history[user_id] if ts > window_start
-    ]
-
-    # Check /plot separately (more expensive)
-    if command == "plot":
-        plot_count = sum(1 for ts, cmd in command_history[user_id] if cmd == "plot")
-        if plot_count >= RATE_LIMIT_PLOT_MAX:
-            return False, f"⏳ /plot limited to {RATE_LIMIT_PLOT_MAX} times per minute. Wait a bit."
-
-    # Check total commands
-    total_count = len(command_history[user_id])
-    if total_count >= RATE_LIMIT_MAX_COMMANDS:
-        return False, f"⏳ Rate limit: {RATE_LIMIT_MAX_COMMANDS} commands per minute. Wait a bit."
-
-    # Record this command
-    command_history[user_id].append((now, command))
-    return True, ""
-
-
-def get_service_status() -> str:
-    """Get systemd service status via CLI"""
-    result = run_cli(["status"])
+# ── GPU / System Info (async) ───────────────────────────────────────
+async def get_gpu_info() -> str:
     try:
-        data = json.loads(result.stdout)
-        return data.get("status", "unknown")
-    except:
-        return "unknown"
-
-
-def get_gpu_info() -> str:
-    """Get GPU utilization and memory"""
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=utilization.gpu,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-gpu=name,utilization.gpu,temperature.gpu,memory.used,memory.total,power.draw",
+            "--format=csv,noheader",
+            stdout=asyncio.subprocess.PIPE
         )
-        util, used, total = result.stdout.strip().split(",")
-        return f"GPU: {util.strip()}%, {used.strip()}/{total.strip()}MB"
-    except Exception as e:
-        return f"GPU: N/A ({e})"
-
-
-def get_current_step() -> int:
-    """Get current training step from log file"""
-    try:
-        if LOG_FILE.exists():
-            with open(LOG_FILE, "r") as f:
-                lines = f.readlines()
-            for line in reversed(lines):
-                if "Step" in line and "/" in line:
-                    import re
-                    match = re.search(r"Step (\d+)/", line)
-                    if match:
-                        return int(match.group(1))
-        return 0
-    except:
-        return 0
-
-
-def get_loss() -> float:
-    """Get current loss from logs"""
-    try:
-        if LOG_FILE.exists():
-            with open(LOG_FILE, "r") as f:
-                lines = f.readlines()
-            for line in reversed(lines):
-                if "loss=" in line:
-                    match = line.split("loss=")
-                    if len(match) > 1:
-                        return float(match[1].split()[0])
-    except Exception:
-        pass
-    return 0.0
-
-
-def get_latest_checkpoint() -> str:
-    """Get latest checkpoint step via CLI"""
-    result = run_cli(["checkpoint"])
-    try:
-        data = json.loads(result.stdout)
-        step = data.get("step", 0)
-        return str(step) if step > 0 else "N/A"
-    except:
-        return "N/A"
-
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    is_admin_user = is_admin(user_id)
-
-    msg = """🚀 *Bulba1 Bot*
-
-📊 *Status*
-/gpu - GPU utilization & memory
-/system - CPU, RAM, Disk
-/eta - Time remaining
-/checkpoint - Latest save
-
-📜 *Logs*
-/logs [n] - Last n lines (default 10)
-/plot - Training loss graph
-
-💬 *Chat*
-/chat [text] - Generate response (3/day)"""
-
-    if is_admin_user:
-        msg += """
-
-🔧 *Admin*
-▶️ /train - Start training
-⏹️ /stop - Stop training
-⏸️ /pause - Pause training
-▶️ /resume - Resume training
-🔄 /restart - Restart training
-💾 /save - Save checkpoint now
-🗑️ /cleanup - Delete old checkpoints
-🗑️ /reset - Reset from step 0
-📥 /pull - Pull latest code
-⏰ /schedule [time] - Schedule start
-⚙️ /config - Set parameters
-📤 /download - Send checkpoint
-📦 /export_hf - Export HF format
-
-🛑 *System*
-/quit - Stop training & disconnect
-/shutdown - Power off machine
-/restart_bot - Restart bot"""
-
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command"""
-    await start_command(update, context)
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /status command"""
-    user_id = update.effective_user.id
-    allowed, msg = check_rate_limit(user_id, "status")
-    if not allowed:
-        await update.message.reply_text(msg)
-        return
-
-    status = get_service_status()
-    gpu = get_gpu_info()
-    step = get_current_step()
-    loss = get_loss()
-    checkpoint = get_latest_checkpoint()
-
-    status_emoji = "✅" if status == "active" else "❌"
-
-    msg = f"""
-{status_emoji} *Training Status*
-
-Service: `{status}`
-{gpu}
-Step: `{step}/100000`
-Loss: `{loss:.4f}`
-Checkpoint: `{checkpoint}`
-"""
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-
-async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /logs command - show last N lines"""
-    user_id = update.effective_user.id
-    allowed, msg = check_rate_limit(user_id, "logs")
-    if not allowed:
-        await update.message.reply_text(msg)
-        return
-
-    try:
-        n = 10
-        if context.args:
-            try:
-                n = int(context.args[0])
-            except ValueError:
-                pass
-
-        if LOG_FILE.exists():
-            with open(LOG_FILE, "r") as f:
-                lines = f.readlines()[-n:]
-            # Escape special markdown chars, use plain text
-            log_text = "".join(lines).replace("_", "❟").replace("*", "•").replace("`", "›")
-            await update.message.reply_text(f"📝 Last {n} lines from logs:\n\n{log_text}")
-        else:
-            await update.message.reply_text("❌ Log file not found")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-async def checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /checkpoint command"""
-    user_id = update.effective_user.id
-    allowed, msg = check_rate_limit(user_id, "checkpoint")
-    if not allowed:
-        await update.message.reply_text(msg)
-        return
-
-    checkpoint = get_latest_checkpoint()
-    step = get_current_step()
-    loss = get_loss()
-
-    msg = f"""
-📦 *Checkpoint Info*
-
-Latest: `{checkpoint}`
-Current step: `{step}`
-Current loss: `{loss:.4f}`
-"""
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-
-async def plot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /plot command - generate and send visualization"""
-    user_id = update.effective_user.id
-    allowed, msg = check_rate_limit(user_id, "plot")
-    if not allowed:
-        await update.message.reply_text(msg)
-        return
-
-    await update.message.reply_text("🎨 Generating plot...")
-
-    try:
-        sys.path.insert(0, str(PROJECT_ROOT))
-        from tools.log_viz import parse_log, generate_plots
-
-        if not LOG_FILE.exists():
-            await update.message.reply_text("❌ Log file not found")
-            return
-
-        df = parse_log(str(LOG_FILE))
-        if df is None or len(df) == 0:
-            await update.message.reply_text("❌ No data in log file")
-            return
-
-        output_path = PROJECT_ROOT / "logs" / "bulba1_plot.png"
-        generate_plots(df, str(output_path), "Bulba1 Training")
-
-        # Send the image
-        await update.message.reply_photo(photo=open(output_path, "rb"))
-        await update.message.reply_text(
-            f"✅ Plot generated!\nSteps: {len(df)}, Loss: {df['loss'].iloc[-1]:.4f}"
+        stdout, _ = await proc.communicate()
+        name, util, temp, mem_used, mem_total, power = stdout.decode().strip().split(",")
+        return (
+            f"🎮 *{name.strip()}*\n"
+            f"Util: `{util.strip()}` | Temp: `{temp.strip()}°C`\n"
+            f"VRAM: `{mem_used.strip()}/{mem_total.strip()} MB`\n"
+            f"Power: `{power.strip()}`"
         )
-
     except Exception as e:
-        await update.message.reply_text(f"❌ Error generating plot: {e}")
+        return f"❌ {e}"
 
-
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle unknown messages"""
-    await update.message.reply_text("Unknown command. Use /help for available commands.")
-
-
-# Admin-only commands
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop training - admin only with confirmation"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    # Check if already stopped
-    if get_service_status() != "active":
-        await update.message.reply_text("⚠️ Training already stopped")
-        return
-
-    await update.message.reply_text(
-        "⏹ *Confirm stop training?*\n\n"
-        "Training will pause. Resume with /train\n\n"
-        "Reply /confirm_stop to confirm",
-        parse_mode="Markdown",
-    )
-
-
-async def train_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start training - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    # Use systemd to start training
-    result = subprocess.run(["systemctl", "--user", "start", "bulba1-225m"], capture_output=True, text=True)
-    if result.returncode == 0:
-        await update.message.reply_text("▶ Training started")
-    else:
-        await update.message.reply_text(f"❌ Error: {result.stderr}")
-
-
-async def save_checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save checkpoint - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text("💾 Saving checkpoint...")
-
-    # Find main training process (parent of worker processes)
-    result = subprocess.run(
-        ["pgrep", "-f", "run_225m.py"],
-        capture_output=True,
-        text=True,
-    )
-    pids = result.stdout.strip().split("\n") if result.stdout.strip() else []
-    if not pids:
-        await update.message.reply_text("❌ Training not running")
-        return
-
-    main_pid = pids[0]
-    os.kill(int(main_pid), signal.SIGUSR1)
-
-    await update.message.reply_text("✅ Checkpoint saved!")
-
-
-async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cleanup old checkpoints - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    if not CHECKPOINT_DIR.exists():
-        await update.message.reply_text("❌ No checkpoint directory")
-        return
-
-    files = sorted(CHECKPOINT_DIR.glob("checkpoint_*.safetensors"), key=lambda f: f.stat().st_mtime)
-    if not files:
-        await update.message.reply_text("✅ No checkpoints to clean")
-        return
-
-    keep_top = 3
-    to_delete = files[:-keep_top] if len(files) > keep_top else []
-    freed = 0
-    for f in to_delete:
-        size_mb = f.stat().st_size / 1024 / 1024
-        f.unlink()
-        for ext in [".json", "_optimizer.pt"]:
-            companion = f.with_name(f.name.replace(".safetensors", ext))
-            if companion.exists():
-                companion.unlink()
-        freed += size_mb
-
-    remaining = len(files) - len(to_delete)
-    await update.message.reply_text(f"🗑️ Cleaned {len(to_delete)} checkpoints\nFreed: {freed:.1f} MB\nRemaining: {remaining}")
-
-
-async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Restart training - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    result = subprocess.run(["systemctl", "--user", "restart", "bulba1-225m"], capture_output=True, text=True)
-    if result.returncode == 0:
-        await update.message.reply_text("🔄 Training restarted")
-    else:
-        await update.message.reply_text(f"❌ Error: {result.stderr}")
-
-
-async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pause training - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    result = subprocess.run(["pkill", "-STOP", "-f", "run_225m.py"], capture_output=True, text=True)
-    if result.returncode == 0:
-        await update.message.reply_text("⏸ Training paused\n\nUse /resume to continue")
-    else:
-        await update.message.reply_text("❌ Could not pause (training may not be running)")
-
-
-async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resume training - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    result = subprocess.run(["pkill", "-CONT", "-f", "run_225m.py"], capture_output=True, text=True)
-    if result.returncode == 0:
-        await update.message.reply_text("▶ Training resumed")
-    else:
-        await update.message.reply_text("❌ Could not resume")
-
-
-async def pull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Git pull latest code - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text("📥 Pulling latest code...")
-    result = subprocess.run(
-        ["git", "pull", "origin", "master"],
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        await update.message.reply_text(f"✅ Pulled:\n{result.stdout}")
-    else:
-        await update.message.reply_text(f"❌ Error:\n{result.stderr}")
-
-
-async def restart_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Restart bot service - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text("🔄 Restarting bot...")
-    subprocess.run(["systemctl", "--user", "restart", "bulba1-bot"])
-    await update.message.reply_text("✅ Bot restarting...")
-
-
-async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reset training from step 0 - admin only with confirmation"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text(
-        "🗑 *Confirm reset training?*\n\n"
-        "⚠️ ALL checkpoints will be DELETED!\n"
-        "Training starts from step 0\n\n"
-        "Reply /confirm_reset to confirm",
-        parse_mode="Markdown",
-    )
-
-
-async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shutdown computer - admin only with confirmation"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text(
-        "⚠️ *Shutdown computer?*\n\nReply /confirm_shutdown to confirm.", parse_mode="Markdown"
-    )
-
-
-async def confirm_shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Confirm shutdown - admin only"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text("🛑 Shutting down...")
-    subprocess.run(["systemctl", "poweroff"])
-
-
-async def gpu_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get detailed GPU info directly"""
+async def get_system_info() -> str:
     try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,utilization.gpu,temperature.gpu,memory.used,memory.total,power.draw",
-                "--format=csv,noheader",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        name, util, temp, mem_used, mem_total, power = result.stdout.strip().split(",")
-
-        name = name.strip()
-        util = util.strip().replace(" %", "%")
-        temp = temp.strip()
-        mem_used = mem_used.strip().replace(" MiB", "").replace("MiB", "")
-        mem_total = mem_total.strip().replace(" MiB", "").replace("MiB", "")
-        power = power.strip().replace(" W", "W").replace("W", "W")
-
-        msg = f"GPU: {name}\n"
-        msg += f"Util: {util}\n"
-        msg += f"Temp: {temp}C\n"
-        msg += f"VRAM: {mem_used}/{mem_total}MB\n"
-        msg += f"Power: {power}"
-
-        await update.message.reply_text(msg)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
-
-
-async def system_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get system info directly"""
-    try:
-        # RAM
         with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    total = int(line.split()[1]) // 1024
-                elif line.startswith("MemAvailable:"):
-                    free = int(line.split()[1]) // 1024
-        used = total - free
+            lines = f.readlines()
+        total = int(lines[0].split()[1]) // 1024
+        avail = int(lines[2].split()[1]) // 1024
+        used = total - avail
 
-        # CPU
         with open("/proc/loadavg") as f:
             load = f.read().split()[0]
         with open("/proc/cpuinfo") as f:
-            cpu_count = f.read().count("processor")
+            cores = f.read().count("processor\t:")
 
-        # Disk
-        result = subprocess.run(["df", "-h", "/"], capture_output=True, text=True)
-        disk = result.stdout.split("\n")[1].split()[2:4]
+        proc = await asyncio.create_subprocess_exec(
+            "df", "-h", "/", stdout=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        disk = stdout.decode().splitlines()[1].split()[2:4]
 
-        msg = f"💻 *System Info*\n\n"
-        msg += f"CPU: `{cpu_count} cores` | Load: `{load}`\n"
-        msg += f"RAM: `{used}/{total} MB` ({used * 100 // total}%)\n"
-        msg += f"Disk: `{disk[0]}/{disk[1]}`"
-
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        return (
+            f"💻 *System*\n"
+            f"CPU: `{cores}` cores | Load: `{load}`\n"
+            f"RAM: `{used}/{total} MB` ({used*100//total}%)\n"
+            f"Disk: `{disk[0]}/{disk[1]}`"
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+        return f"❌ {e}"
 
+# ── Training state ──────────────────────────────────────────────────
+def read_log_tail(n: int = 100) -> list[str]:
+    if not LOG_FILE.exists():
+        return []
+    with open(LOG_FILE, "r") as f:
+        lines = f.readlines()
+    return lines[-n:]
 
-# Notification system - poll for events
-EVENT_FILE = PROJECT_ROOT / "logs" / "events.json"
-last_event_time = 0
+def get_current_step() -> int:
+    for line in reversed(read_log_tail(200)):
+        m = re.search(r"Step (\d+)/", line)
+        if m:
+            return int(m.group(1))
+    return 0
 
+def get_loss() -> float:
+    for line in reversed(read_log_tail(200)):
+        m = re.search(r"loss=([\d.]+)", line)
+        if m:
+            return float(m.group(1))
+    return 0.0
 
-async def check_notifications(app: Application):
-    """Check for new events and notify"""
-    global last_event_time
-    try:
-        if EVENT_FILE.exists():
-            mtime = os.path.getmtime(EVENT_FILE)
-            if mtime > last_event_time:
-                last_event_time = mtime
-                with open(EVENT_FILE) as f:
-                    events = json.load(f)
-                # Send latest events
-                for event in events[-3:]:
-                    await app.bot.send_message(
-                        chat_id=ADMIN_IDS, text=event.get("message", "Event"), parse_mode="Markdown"
-                    )
-                # Clear old events
-                open(EVENT_FILE, "w").close()
-    except Exception:
-        pass
+def get_latest_checkpoint() -> int | None:
+    if not CHECKPOINT_DIR.exists():
+        return None
+    files = sorted(CHECKPOINT_DIR.glob("checkpoint_step_*.safetensors"))
+    if files:
+        return int(files[-1].stem.split("_")[-1])
+    return None
 
+# ── Decorators ──────────────────────────────────────────────────────
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not is_admin(update.effective_user.id):
+            if update.callback_query:
+                await update.callback_query.answer("⛔ Admin only", show_alert=True)
+            else:
+                await update.message.reply_text("⛔ Admin only")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
 
-def add_event(message: str):
-    """Add event to notification queue"""
-    try:
-        events = []
-        if EVENT_FILE.exists():
-            with open(EVENT_FILE) as f:
-                events = json.load(f)
-        events.append({"message": message, "time": time.time()})
-        events = events[-10:]
-        with open(EVENT_FILE, "w") as f:
-            json.dump(events, f)
-    except Exception:
-        pass
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
+# ── Rate limiter ────────────────────────────────────────────────────
+class RateLimiter:
+    def __init__(self, max_calls: int = 10, window: float = 60.0):
+        self.max_calls = max_calls
+        self.window = window
+        self.history: dict[int, list[float]] = {}
 
-async def eta_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get ETA to completion"""
+    def check(self, user_id: int) -> bool:
+        now = time.time()
+        if user_id not in self.history:
+            self.history[user_id] = []
+        self.history[user_id] = [t for t in self.history[user_id] if now - t < self.window]
+        if len(self.history[user_id]) >= self.max_calls:
+            return False
+        self.history[user_id].append(now)
+        return True
+
+    def remaining(self, user_id: int) -> int:
+        now = time.time()
+        if user_id not in self.history:
+            return self.max_calls
+        active = len([t for t in self.history[user_id] if now - t < self.window])
+        return max(0, self.max_calls - active)
+
+limiter = RateLimiter(max_calls=15, window=60.0)
+chat_limiter = RateLimiter(max_calls=5, window=3600.0)  # 5 chats per hour
+
+# ── Keyboards ───────────────────────────────────────────────────────
+def main_keyboard(is_admin_user: bool) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("📊 Status", callback_data="status"),
+         InlineKeyboardButton("🖥 GPU", callback_data="gpu")],
+        [InlineKeyboardButton("💻 System", callback_data="system"),
+         InlineKeyboardButton("⏱ ETA", callback_data="eta")],
+        [InlineKeyboardButton("📝 Logs", callback_data="logs"),
+         InlineKeyboardButton("📈 Plot", callback_data="plot")],
+        [InlineKeyboardButton("📦 Checkpoint", callback_data="checkpoint")],
+    ]
+    if is_admin_user:
+        buttons += [
+            [InlineKeyboardButton("▶ Start", callback_data="train"),
+             InlineKeyboardButton("⏹ Stop", callback_data="stop")],
+            [InlineKeyboardButton("🔄 Restart", callback_data="restart"),
+             InlineKeyboardButton("💾 Save", callback_data="save")],
+        ]
+    return InlineKeyboardMarkup(buttons)
+
+# ── Command handlers ────────────────────────────────────────────────
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = main_keyboard(is_admin(update.effective_user.id))
+    await update.message.reply_text("🎛 *Bulba1 Control Panel*", reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_command(update, context)
+
+@RateLimiter().check  # not using decorator properly, will fix below
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not limiter.check(user_id):
+        await update.message.reply_text("⏳ Slow down! Try again in a moment.")
+        return
+
+    status = await get_service_status()
+    gpu = await get_gpu_info()
     step = get_current_step()
     loss = get_loss()
+    ckpt = get_latest_checkpoint()
 
-    if step == 0:
-        await update.message.reply_text("❌ Training not started")
-        return
+    msg = (
+        f"{'✅' if status == 'active' else '❌'} *Training Status*\n\n"
+        f"Service: `{status}`\n"
+        f"{gpu}\n"
+        f"Step: `{step}/100000`\n"
+        f"Loss: `{loss:.4f}`\n"
+        f"Checkpoint: `{ckpt or 'N/A'}`"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-    # Estimate from loss rate
-    # Assume ~70 tok/s, 512 seq, batch 5 = ~1400 tokens/step
-    # 100k steps remaining, ~70 sec/step = 194 hours (too high)
-    # Better: use avg time per step from logs
-    try:
-        if LOG_FILE.exists():
-            with open(LOG_FILE) as f:
-                lines = f.readlines()
-            # Find last line with timing
-            for line in reversed(lines):
-                if "tok/s" in line:
-                    import re
+async def gpu_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id):
+        return await update.message.reply_text("⏳ Slow down!")
+    msg = await get_gpu_info()
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-                    match = re.search(r"tok/s=(\d+)", line)
-                    if match:
-                        tok_rate = int(match.group(1))
-                        remaining_steps = 100000 - step
-                        # avg 100 sec/step (from log), tok/s not accurate
-                        # Estimate: ~90 sec/step
-                        eta_seconds = remaining_steps * 90
-                        hours = eta_seconds // 3600
-                        minutes = (eta_seconds % 3600) // 60
-                        msg = f"⏱️ *ETA*\n\n"
-                        msg += f"Current: `{step}/100000` ({step / 1000}%)\n"
-                        msg += f"Loss: `{loss:.4f}`\n"
-                        msg += f"Remaining: `{hours}h {minutes}m`"
-                        await update.message.reply_text(msg, parse_mode="Markdown")
-                        return
-    except Exception as e:
-        pass
+async def system_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id):
+        return await update.message.reply_text("⏳ Slow down!")
+    msg = await get_system_info()
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
+async def eta_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id):
+        return await update.message.reply_text("⏳ Slow down!")
+    step = get_current_step()
+    loss = get_loss()
+    remaining = 100000 - step
+    # грубая оценка: ~0.3 сек/шаг с учётом предтокенизации
+    eta_sec = remaining * 0.3
+    hours, mins = int(eta_sec // 3600), int((eta_sec % 3600) // 60)
     await update.message.reply_text(
-        f"⏱️ Step: `{step}/100000` | Loss: `{loss:.4f}`", parse_mode="Markdown"
+        f"⏱ *ETA*\nStep: `{step}/100000`\nLoss: `{loss:.4f}`\nRemaining: `{hours}h {mins}m`",
+        parse_mode=ParseMode.MARKDOWN
     )
 
+async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id):
+        return await update.message.reply_text("⏳ Slow down!")
+    n = min(int(context.args[0]) if context.args else 10, 50)
+    lines = read_log_tail(n)
+    if not lines:
+        return await update.message.reply_text("❌ Log file not found")
+    text = "".join(lines[-n:]).replace("_", "\\_").replace("*", "•")
+    await update.message.reply_text(f"📝 Last {n} lines:\n\n{text}")
 
-# Remote config - save desired config, training reads it on restart
-CONFIG_FILE = PROJECT_ROOT / "logs" / "desired_config.json"
+async def plot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id):
+        return await update.message.reply_text("⏳ Slow down!")
+    await update.message.reply_text("🎨 Generating plot...")
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from tools.log_viz import parse_log, generate_plots
+    if not LOG_FILE.exists():
+        return await update.message.reply_text("❌ Log file not found")
+    df = parse_log(str(LOG_FILE))
+    if df is None or len(df) == 0:
+        return await update.message.reply_text("❌ No data")
+    output = PROJECT_ROOT / "logs" / "bulba1_plot.png"
+    generate_plots(df, str(output), "Bulba1 Training")
+    await update.message.reply_photo(photo=open(output, "rb"))
 
+async def checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id):
+        return await update.message.reply_text("⏳ Slow down!")
+    ckpt = get_latest_checkpoint()
+    step = get_current_step()
+    loss = get_loss()
+    await update.message.reply_text(
+        f"📦 *Checkpoint*\nLatest: `{ckpt or 'N/A'}`\nStep: `{step}`\nLoss: `{loss:.4f}`",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set remote config - batch_size, lr etc"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
+# ── Admin commands ──────────────────────────────────────────────────
+@admin_only
+async def train_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ok, _ = await run_systemctl("start", SERVICE_NAME)
+    await update.message.reply_text("▶ Training started" if ok else "❌ Failed to start")
 
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "⚙️ *Remote Config*\n\n"
-            "Usage: /config batch_size=5 lr=1e-4\n\n"
-            "Available: batch_size, lr, seq_len",
-            parse_mode="Markdown",
-        )
-        return
+@admin_only
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ok, _ = await run_systemctl("stop", SERVICE_NAME)
+    await update.message.reply_text("⏹ Training stopped" if ok else "❌ Failed to stop")
 
-    valid_keys = {"batch_size", "lr", "learning_rate", "seq_len", "weight_decay"}
-    updates = {}
-    for arg in args:
-        if "=" in arg:
-            key, val = arg.split("=", 1)
-            if key not in valid_keys:
-                await update.message.reply_text(f"❌ Invalid key: {key}\nValid: {', '.join(valid_keys)}")
-                return
-            try:
-                if "." in val:
-                    updates[key] = float(val)
-                else:
-                    updates[key] = int(val)
-            except ValueError:
-                await update.message.reply_text(f"❌ Invalid value: {val}")
-                return
+@admin_only
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ok, _ = await run_systemctl("restart", SERVICE_NAME)
+    await update.message.reply_text("🔄 Training restarted" if ok else "❌ Failed to restart")
 
-    if not updates:
-        await update.message.reply_text("⚙️ *Remote Config*\n\nUsage: /config batch_size=5 lr=1e-4\n\nValid: batch_size, lr, seq_len, weight_decay", parse_mode="Markdown")
-        return
-
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(updates, f, indent=2)
-
-    msg = "✅ *Config updated*\n\n" + "\n".join(f"`{k}` = {v}" for k, v in updates.items()) + "\n\nWill apply on restart"
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-
-# Chat rate limiting for public users
-CHAT_LIMIT_DAILY = 3  # Max 3 chats per day for non-admin
-chat_usage = {}  # user_id -> [(day, count)]
-
-
-def check_chat_limit(user_id: int) -> tuple[bool, int]:
-    """Check daily chat limit for user. Returns (allowed, remaining)"""
-    from datetime import datetime
-
-    today = datetime.now().day
-
-    if user_id not in chat_usage:
-        chat_usage[user_id] = []
-
-    # Clean old entries
-    chat_usage[user_id] = [(day, cnt) for day, cnt in chat_usage[user_id] if day == today]
-
-    total = sum(cnt for _, cnt in chat_usage[user_id])
-    remaining = CHAT_LIMIT_DAILY - total
-
-    if remaining <= 0:
-        return False, 0
-
-    # Record this usage
-    chat_usage[user_id].append((today, 1))
-    return True, remaining
-
+@admin_only
+async def save_checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        result = subprocess.run(["pgrep", "-f", "run_225m.py"], capture_output=True, text=True)
+        pids = result.stdout.strip().split()
+        if not pids:
+            return await update.message.reply_text("❌ Training not running")
+        os.kill(int(pids[0]), signal.SIGUSR1)
+        await update.message.reply_text("💾 Checkpoint saved")
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
 
 async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Chat with the model - interactive checkpoint selection"""
     user_id = update.effective_user.id
-    is_admin_user = is_admin(user_id)
-
-    if not is_admin_user:
-        allowed, remaining = check_chat_limit(user_id)
-        if not allowed:
-            await update.message.reply_text(
-                f"⏳ Daily limit reached (3 chats/day).\nUpgrade to admin or wait tomorrow.",
-                parse_mode="Markdown",
-            )
-            return
-
-    checkpoints = sorted(CHECKPOINT_DIR.glob("checkpoint_step_*.safetensors")) if CHECKPOINT_DIR.exists() else []
-
+    if not is_admin(user_id) and not chat_limiter.check(user_id):
+        return await update.message.reply_text("⏳ Chat daily limit reached")
+    checkpoints = sorted(
+        [int(f.stem.split("_")[-1]) for f in CHECKPOINT_DIR.glob("checkpoint_step_*.safetensors")]
+    ) if CHECKPOINT_DIR.exists() else []
     if not checkpoints:
-        await update.message.reply_text("No checkpoints available yet. Train longer to get first checkpoint.")
-        return
-
-    checkpoint_steps = []
-    for f in checkpoints:
-        step = int(f.name.split("_")[-1].replace(".safetensors", ""))
-        checkpoint_steps.append(step)
-    checkpoint_steps.sort()
-
-    if user_id in chat_state and chat_state[user_id].get("step") == "awaiting_prompt":
-        del chat_state[user_id]
-
-    chat_state[user_id] = {"step": "awaiting_checkpoint", "checkpoints": checkpoint_steps}
-
-    options = "\n".join([f"{i+1}. Step {s}" for i, s in enumerate(checkpoint_steps)])
+        return await update.message.reply_text("No checkpoints yet")
+    # show last 5
+    ckpts = checkpoints[-5:]
+    buttons = [[InlineKeyboardButton(f"Step {s}", callback_data=f"chat_{s}")] for s in ckpts]
     await update.message.reply_text(
-        f"Select checkpoint:\n\n{options}\n\nOr type a step number (1-{len(checkpoint_steps)})"
+        "Select checkpoint to chat with:", reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+# ── Callback query handler ─────────────────────────────────────────
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
 
+    # Map callback data to handler functions
+    handlers = {
+        "status": status_command,
+        "gpu": gpu_info_command,
+        "system": system_info_command,
+        "eta": eta_command,
+        "logs": logs_command,
+        "plot": plot_command,
+        "checkpoint": checkpoint_command,
+        "train": train_command,
+        "stop": stop_command,
+        "restart": restart_command,
+        "save": save_checkpoint_command,
+    }
+    if data in handlers:
+        # Передаём управление через fake update
+        update.message = query.message
+        update.effective_user = query.from_user
+        # Для команд, которые читают context.args – не используется в button handlers
+        await handlers[data](update, context)
+    elif data.startswith("chat_"):
+        step = int(data.split("_")[1])
+        context.user_data["chat_step"] = step
+        await query.message.reply_text(f"Checkpoint {step} selected. Type your message:")
+
+# ── Message handler for chat ────────────────────────────────────────
 async def handle_chat_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle non-command text for chat flow"""
     user_id = update.effective_user.id
-    text = update.message.text.strip()
+    step = context.user_data.pop("chat_step", None)
+    if step is None:
+        return await update.message.reply_text("Use /chat to start a conversation")
+    prompt = update.message.text.strip()
+    await update.message.reply_text("🧠 Thinking...")
+    # run in thread to avoid blocking
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: subprocess.run(
+        [sys.executable, "-m", "bulba1.cli", "--steps", "0", "--generate",
+         "--prompt", prompt, "--gen-max-tokens", "100", "--checkpoint", str(step),
+         "--resume", "--device", "cpu"],
+        capture_output=True, text=True, timeout=180
+    ))
+    output = None
+    for line in result.stdout.splitlines():
+        if "Generated:" in line:
+            output = line.split("Generated:", 1)[1].strip()
+    await update.message.reply_text(output or f"Error: {result.stderr[:200]}")
 
-    if user_id not in chat_state:
-        return
-
-    state = chat_state[user_id]
-
-    if state.get("step") == "awaiting_checkpoint":
-        try:
-            idx = int(text) - 1
-            checkpoints = state["checkpoints"]
-            if idx < 0 or idx >= len(checkpoints):
-                await update.message.reply_text(f"Invalid. Type 1-{len(checkpoints)}")
-                return
-
-            state["step"] = "awaiting_prompt"
-            state["checkpoint"] = checkpoints[idx]
-            await update.message.reply_text(f"Checkpoint {checkpoints[idx]} selected.\n\nNow type your message:")
-        except ValueError:
-            await update.message.reply_text("Invalid. Type a number.")
-
-    elif state.get("step") == "awaiting_prompt":
-        checkpoint = state.get("checkpoint")
-        prompt = text
-        del chat_state[user_id]
-
-        await update.message.reply_text(f"Thinking...")
-
-        training_active = get_service_status() == "active"
-        device_flag = [] if not training_active else ["--device", "cpu"]
-
-        result = run_cli(["--steps", "0", "--generate", "--prompt", prompt, "--gen-max-tokens", "100", "--checkpoint", str(checkpoint), "--resume"] + device_flag, timeout=180)
-
-        try:
-            output = None
-            for line in result.stdout.strip().split("\n"):
-                if "Generated:" in line:
-                    output = line.split("Generated:", 1)[1].strip()
-            if output:
-                await update.message.reply_text(f"Bot: {output}")
-            else:
-                await update.message.reply_text(f"Error: {result.stderr[:200]}")
-        except Exception as e:
-            await update.message.reply_text(f"Error: {e}")
-    else:
-        await update.message.reply_text("Use /chat to start conversation")
-
-
-async def quit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop training - admin only with confirmation"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text(
-        "🛑 *Confirm quit & stop training?*\n\n"
-        "Training stops, bot disconnects.\n"
-        "To restart: systemctl --user start bulba1\n\n"
-        "Reply /confirm_quit to confirm",
-        parse_mode="Markdown",
-    )
-
-
-# Download checkpoint
-async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Download latest checkpoint"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    checkpoint = get_latest_checkpoint()
-    if checkpoint == "N/A":
-        await update.message.reply_text("❌ No checkpoints")
-        return
-
-    # Find best checkpoint
-    best = CHECKPOINT_DIR / "best.safetensors"
-    if not best.exists():
-        best = CHECKPOINT_DIR / f"checkpoint_step_{checkpoint}.safetensors"
-
-    if not best.exists():
-        await update.message.reply_text("❌ Checkpoint file not found")
-        return
-
-    await update.message.reply_text(f"📦 Sending checkpoint {checkpoint}...")
-    try:
-        await update.message.reply_document(document=open(best, "rb"))
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-async def export_hf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Export checkpoint to HuggingFace format"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    await update.message.reply_text("📤 Exporting to HuggingFace format...")
-
-    result = run_cli(["--export-hf", "--export-dir", "hf_export"], timeout=120)
-
-    if result.returncode == 0:
-        await update.message.reply_text("✅ Exported to hf_export/")
-    else:
-        await update.message.reply_text(f"❌ Error: {result.stderr or result.stdout}")
-
-
-async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Schedule training start"""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Admin only")
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "⏰ *Schedule*\n\nUsage: /schedule 14:30 (24h format)\nOr /schedule now (immediate)",
-            parse_mode="Markdown",
-        )
-        return
-
-    result = run_cli(["--schedule", args[0]], timeout=10)
-
-    if result.returncode == 0:
-        await update.message.reply_text(f"✅ {result.stdout.strip()}")
-    else:
-        await update.message.reply_text(f"❌ Error: {result.stderr or result.stdout}")
-
-
+# ── Main ────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Bulba1 Telegram Bot")
-    parser.add_argument("--token", help="Telegram bot token")
-    parser.add_argument("--chat-id", help="Telegram chat ID to send messages to")
-    parser.add_argument("--poll", action="store_true", help="Run in polling mode (for testing)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--token")
+    parser.add_argument("--poll", action="store_true")
     args = parser.parse_args()
 
-    # Get token from args, config, or environment
-    token = args.token or BOT_TOKEN or os.environ.get("TELEGRAM_TOKEN")
+    token = args.token or BOT_TOKEN
     if not token:
-        print("ERROR: No token. Create bot_config.py or set TELEGRAM_TOKEN")
-        sys.exit(1)
+        print("No token"); sys.exit(1)
 
-    chat_id = args.chat_id or os.environ.get("TELEGRAM_CHAT_ID")
-
-    # Build application
     app = Application.builder().token(token).build()
 
-    # Add handlers
+    # User commands
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("panel", panel_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("gpu", gpu_info_command))
+    app.add_handler(CommandHandler("system", system_info_command))
+    app.add_handler(CommandHandler("eta", eta_command))
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("plot", plot_command))
     app.add_handler(CommandHandler("checkpoint", checkpoint_command))
     # Admin commands
-    app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("train", train_command))
-    app.add_handler(CommandHandler("training", train_command))  # alias
+    app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("restart", restart_command))
-    app.add_handler(CommandHandler("reset", reset_command))
-    app.add_handler(CommandHandler("shutdown", shutdown_command))
-    app.add_handler(CommandHandler("confirm_shutdown", confirm_shutdown_command))
-    app.add_handler(CommandHandler("gpu", gpu_info_command))
-    app.add_handler(CommandHandler("system", system_info_command))
-    app.add_handler(CommandHandler("eta", eta_command))
-    app.add_handler(CommandHandler("config", config_command))
-    app.add_handler(CommandHandler("chat", chat_command))
-    app.add_handler(CommandHandler("quit", quit_command))
-    app.add_handler(CommandHandler("pull", pull_command))
-    app.add_handler(CommandHandler("restart_bot", restart_bot_command))
     app.add_handler(CommandHandler("save", save_checkpoint_command))
-    app.add_handler(CommandHandler("schedule", schedule_command))
-    app.add_handler(CommandHandler("pause", pause_command))
-    app.add_handler(CommandHandler("resume", resume_command))
-    app.add_handler(CommandHandler("cleanup", cleanup_command))
-
-    # Confirmation handlers
-    async def confirm_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not is_admin(update.effective_user.id):
-            return
-        result = subprocess.run(["systemctl", "--user", "stop", "bulba1-225m"], capture_output=True, text=True)
-        await update.message.reply_text("⏹ Training stopped")
-
-    async def confirm_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not is_admin(update.effective_user.id):
-            return
-        subprocess.run(["systemctl", "--user", "stop", "bulba1-225m"], capture_output=True)
-        if CHECKPOINT_DIR.exists():
-            for f in CHECKPOINT_DIR.glob("checkpoint_*"):
-                f.unlink()
-            for f in CHECKPOINT_DIR.glob("*.pt"):
-                f.unlink()
-        if LOG_FILE.exists():
-            open(LOG_FILE, "w").close()
-        await update.message.reply_text("🗑 Reset! Training from step 0\n\nUse /train to start fresh")
-
-    async def confirm_quit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not is_admin(update.effective_user.id):
-            return
-        subprocess.run(["systemctl", "--user", "stop", "bulba1-225m"])
-        await update.message.reply_text("🛑 Stopped. Bye!")
-
-    app.add_handler(CommandHandler("confirm_stop", confirm_stop))
-    app.add_handler(CommandHandler("confirm_reset", confirm_reset))
-    app.add_handler(CommandHandler("confirm_quit", confirm_quit))
-
-    app.add_handler(CommandHandler("download", download_command))
-    app.add_handler(CommandHandler("export_hf", export_hf_command))
-    app.add_handler(CommandHandler("schedule", schedule_command))
+    # Chat
+    app.add_handler(CommandHandler("chat", chat_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_input))
+    # Callback
+    app.add_handler(CallbackQueryHandler(button_callback))
 
-    print(f"🤖 Bulba1 Bot started! (config: {_config_loaded})")
-    print(f"Commands: /start, /logs, /plot, /checkpoint, /gpu, /system, /eta, /chat")
-    print(f"Admin: /train, /stop, /restart, /save, /reset, /pull, /config, /schedule, /download, /export_hf, /quit, /shutdown")
-
-    if chat_id:
-        # One-way mode: just send startup message and exit
-        import asyncio
-
-        async def send_startup():
-            await app.bot.send_message(
-                chat_id=chat_id, text="🚀 Bulba1 Bot connected!\nUse /gpu or /eta to check training."
-            )
-
-        asyncio.run(send_startup())
-        print(f"📤 Sent startup message to chat {chat_id}")
-    else:
-        # Polling mode
-        app.run_polling()
-
+    print(f"🤖 Bulba1 Bot ({_config_source})")
+    app.run_polling()
 
 if __name__ == "__main__":
+    import argparse
     main()

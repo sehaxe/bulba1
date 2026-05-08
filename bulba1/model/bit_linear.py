@@ -47,6 +47,76 @@ def fp4_quant_ste(x: torch.Tensor, M: int = 3, b: int = 2) -> torch.Tensor:
     return x_ste * scale
 
 
+def q_int4_ste(x: torch.Tensor) -> torch.Tensor:
+    """4-bit integer quantization (absmean) for activations."""
+    beta = x.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
+    scale = beta / 7.0
+    x_norm = x / scale
+    x_quant = torch.round(torch.clamp(x_norm, -8, 7))
+    return (x_quant - x_norm).detach() + x_norm * scale
+
+
+def q_fp4_ste(x: torch.Tensor, M: int = 2, E: int = 2) -> torch.Tensor:
+    """4-bit floating-point quantization (E2M1 format)."""
+    abs_x = x.abs()
+    log2_abs = torch.log2(abs_x.clamp_min(1e-8))
+    gamma = 2 ** torch.clamp(torch.floor(log2_abs) + (2**E - 1), min=1.0)
+    denom = 2 ** (M + 2**E - 1)
+    scale = gamma / denom
+    x_quant = torch.round(x / scale)
+    return (x_quant - x / scale).detach() + x * scale
+
+
+def topk_sparsify(x: torch.Tensor, k: float = 0.5) -> torch.Tensor:
+    """Retain top-K fraction of activations, set rest to zero."""
+    if not x.requires_grad:
+        abs_x = x.abs()
+        threshold = torch.quantile(abs_x, 1.0 - k, dim=-1, keepdim=True)
+        mask = abs_x >= threshold
+        return x * mask
+    abs_x = x.abs()
+    threshold = torch.quantile(abs_x, 1.0 - k, dim=-1, keepdim=True)
+    mask = abs_x >= threshold
+    return (mask.float() * x - x).detach() + x
+
+
+def quantize_ste_absmax(x: torch.Tensor, num_bits: int = 8) -> torch.Tensor:
+    """Symmetric absmax quantization with straight-through estimator."""
+    Qb = 2 ** (num_bits - 1) - 1
+    gamma = x.abs().max(dim=-1, keepdim=True)[0].clamp_min(1e-8)
+    scale = gamma / Qb
+    x_norm = x / scale
+    x_quant = torch.round(torch.clamp(x_norm, -Qb, Qb))
+    return (x_quant - x_norm).detach() + x_norm * scale
+
+
+def hadamard_transform(x):
+    """Fast Walsh-Hadamard Transform (FWHT) по последнему измерению."""
+    *batch_dims, D = x.shape
+    x = x.reshape(-1, D)
+    N = D
+    m = 1
+    while m < N:
+        m <<= 1
+    if m != N:
+        x = F.pad(x, (0, m - N))
+    step = 1
+    while step < m:
+        for i in range(0, m, step * 2):
+            u = x[:, i:i+step]
+            v = x[:, i+step:i+2*step]
+            x[:, i:i+step] = u + v
+            x[:, i+step:i+2*step] = u - v
+        step <<= 1
+    x = x[:, :N].reshape(*batch_dims, D)
+    return x / (m ** 0.5)
+
+
+def q_int4_v2(x):
+    """4-bit INT4 для BitNet v2 (после Hadamard transform)."""
+    return q_int4_ste(x)
+
+
 def make_linear(
     cfg, in_features: int, out_features: int, bias: bool = False, quantize_input: bool = True
 ):

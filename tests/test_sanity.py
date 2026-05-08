@@ -6,10 +6,10 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from bulba1.utils.config import ModelConfig
+from bulba1.config import ModelConfig
 from bulba1.model.minichat import MiniChat
-from bulba1.model.mamba import Mamba2SSD
-from bulba1.data.tokenizer import HFTokenizer, TextDataset, create_dataloader
+from bulba1.model.mamba import MambaBlock
+from bulba1.tokenizer import HFTokenizer, TextDataset, create_dataloader
 from bulba1.training.engine import TrainingEngine
 from bulba1.training.checkpoint import CheckpointManager
 from bulba1.training.chunked_ce import chunked_cross_entropy
@@ -54,11 +54,10 @@ def test_chunked_ce_correctness():
 
 def test_mamba_bf16():
     cfg = ModelConfig(d_model=64, mamba_d_state=16, mamba_d_conv=4, mamba_expand=2)
-    m = Mamba2SSD(cfg).cuda().bfloat16()
-    x = torch.randn(1, 32, 64, device="cuda", dtype=torch.bfloat16)
+    m = MambaBlock(cfg).cuda().bfloat16()
+    x = torch.randn(1, 8, 64, device="cuda").bfloat16()
     out = m(x)
-    assert out.shape == (1, 32, 64)
-    print("PASS: mamba_bf16")
+    assert out.shape == x.shape
 
 
 def test_eval_device_string():

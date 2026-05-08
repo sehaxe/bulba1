@@ -1,70 +1,61 @@
-import os, sys, glob, struct, multiprocessing as mp
-from functools import partial
-from tqdm import tqdm
+#!/usr/bin/env python3
+"""Быстрая предтокенизация: батчи, encode_batch, memmap."""
+import os, sys, glob
+import numpy as np
+from concurrent.futures import ProcessPoolExecutor
+from bulba1.tokenizer import FastTokenizer
 
-sys.path.insert(0, "/home/sehaxe/bulba1-python")
-from bulba1.data.tokenizer import FastTokenizer
+DATA_TRAIN = "data/train"
+TOKENIZER_PATH = "data/tokenizer_fast.json"
+BIN_OUT = "data/tokenized"
+CHUNK_LINES = 100_000
 
-BATCH_BYTES = 8_000_000
-CHUNK_BYTES = 100_000
+os.makedirs(BIN_OUT, exist_ok=True)
+tok = FastTokenizer(TOKENIZER_PATH)
+tok.load()
 
+def process_file(txt_path):
+    bin_path = os.path.join(BIN_OUT, os.path.basename(txt_path).replace(".txt", ".bin"))
+    if os.path.exists(bin_path):
+        return f"SKIP {os.path.basename(txt_path)}"
+    est_size = os.path.getsize(txt_path) // 10 * 4
+    arr = np.memmap(bin_path, dtype=np.int32, mode='w+', shape=(est_size // 4,))
+    write_pos = 0
+    with open(txt_path, encoding="utf-8") as f:
+        batch = []
+        for line in f:
+            batch.append(line.strip())
+            if len(batch) >= CHUNK_LINES:
+                encoded = tok.encode_batch(batch)
+                for ids in encoded:
+                    if ids:
+                        end = write_pos + len(ids)
+                        if end > arr.shape[0]:
+                            arr = np.memmap(bin_path, dtype=np.int32, mode='r+', shape=(end,))
+                        arr[write_pos:end] = ids
+                        write_pos = end
+                batch = []
+        if batch:
+            encoded = tok.encode_batch(batch)
+            for ids in encoded:
+                if ids:
+                    end = write_pos + len(ids)
+                    if end > arr.shape[0]:
+                        arr = np.memmap(bin_path, dtype=np.int32, mode='r+', shape=(end,))
+                    arr[write_pos:end] = ids
+                    write_pos = end
+    if write_pos < arr.shape[0]:
+        arr = np.memmap(bin_path, dtype=np.int32, mode='r+', shape=(write_pos,))
+    arr.flush()
+    return f"OK {os.path.basename(txt_path)} → {os.path.basename(bin_path)} ({write_pos} токенов)"
 
-def _process_one(path: str, model_path: str) -> tuple:
-    out_path = path + ".bin"
-    fsize = os.path.getsize(path)
-    if os.path.exists(out_path) and os.path.getmtime(out_path) >= os.path.getmtime(path):
-        if os.path.getsize(out_path) >= fsize * 0.2:
-            return (path, 0, True)
-
-    tokenizer = FastTokenizer(model_path=model_path)
-    tokenizer.load()
-    ntokens = 0
-    with open(path, "r", encoding="utf-8", errors="ignore") as f_in, open(out_path, "wb") as f_out:
-        for text_chunk in iter(lambda: f_in.read(BATCH_BYTES), ""):
-            substrs = [
-                text_chunk[i : i + CHUNK_BYTES] for i in range(0, len(text_chunk), CHUNK_BYTES)
-            ]
-            for ids in tokenizer.encode_batch(substrs):
-                f_out.write(struct.pack(f"<{len(ids)}i", *ids))
-                ntokens += len(ids)
-    return (path, ntokens, False)
-
-
-def pretokenize(data_dir: str = "data/train", model_path: str = "data/tokenizer_fast.json"):
-    files = sorted(glob.glob(os.path.join(data_dir, "**/*.txt"), recursive=True))
-    big_files = [f for f in files if os.path.getsize(f) > 100_000]
-    if not big_files:
-        print("No .txt files found")
-        return
-
-    workers = max(1, min(4, mp.cpu_count() - 1))
-    total_bytes = sum(os.path.getsize(f) for f in big_files)
-    total_tokens = 0
-    skipped = 0
-
-    print(
-        f"Pre-tokenizing {len(big_files)} files ({total_bytes / 1024**3:.1f} GB) with {workers} workers..."
-    )
-    pbar = tqdm(
-        total=total_bytes, desc="Tokenizing", unit="B", unit_scale=True, position=0, leave=True
-    )
-
-    fn = partial(_process_one, model_path=model_path)
-    with mp.Pool(processes=workers) as pool:
-        for path, n_tok, was_skipped in pool.imap_unordered(fn, big_files):
-            fsize = os.path.getsize(path)
-            pbar.update(fsize)
-            pbar.refresh()
-            name = os.path.basename(path)
-            if was_skipped:
-                skipped += 1
-            else:
-                total_tokens += n_tok
-                pbar.write(f"  {name}: {n_tok / 1e6:.1f}M tokens")
-
-    pbar.close()
-    print(f"Done. Skipped {skipped} files. Total tokens: {total_tokens / 1e6:.1f}M")
-
+def main():
+    txt_files = sorted(glob.glob(os.path.join(DATA_TRAIN, "*.txt")))
+    with ProcessPoolExecutor(max_workers=2) as executor:
+        results = executor.map(process_file, txt_files)
+    for r in results:
+        print(r)
+    print("✅ Предтокенизация завершена. Переключите data_dir на 'data/tokenized' в конфиге.")
 
 if __name__ == "__main__":
-    pretokenize()
+    main()

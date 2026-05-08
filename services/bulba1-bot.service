@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=%h/bulba1-python
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/uv run --directory %h/bulba1-python python telegram_bot/bot.py --poll
+ExecStart=%h/bulba1-python/.venv/bin/python telegram_bot/bot.py --poll
 Restart=on-failure
 RestartSec=10
 

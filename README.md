@@ -2,15 +2,18 @@
 
 Self-hosted LLM training on consumer GPU. **225M params, 16 layers** — runs on RTX 5060 Ti 16GB.
 
-```bash
-# Quick start
-git clone git@codeberg.org:quazder/bulba1.git
-cd bulba1
-uv sync
-mkdir -p data/train
-# Add .txt training files to data/train/
-./bulba --steps 100000
-```
+## 🚀 Быстрый старт
+
+git clone <repo>
+cd bulba1-python
+
+make install          # установить зависимости (Mamba-3 wheel + dev)
+make data             # скачать датасеты
+make build            # собрать датасет и обучить токенизатор
+make install-services # установить systemd-юниты
+
+systemctl --user start bulba1   # запустить обучение
+journalctl --user -u bulba1 -f  # смотреть логи
 
 ## 🚀 Features
 

@@ -1,0 +1,44 @@
+model:
+  d_model: 640
+  n_layers: 14
+  n_heads: 10
+  num_experts: 16
+  expert_hidden: 640
+  vocab_size: 32000
+  use_mamba: true
+  attn_every_n_layers: 4
+  use_bitlinear: true
+  use_rex: true
+  use_mhc: true
+  mhc_iterations: 5
+  use_mtp: true
+  use_skip_gram: true
+  depth_scaled_init: true
+  use_kda: true
+  kda_use_rope: true
+  kda_double_gate: true
+  kda_use_parallel_scan: true
+  use_bitnet_a48: true
+  a48_attn_topk_sparsity: 0.5
+  a48_use_relu2_glu: true
+  a48_two_stage_training: false
+  use_quantized_kv_cache: true
+  kv_cache_bits: 3
+  num_workers: 2
+  prefetch_factor: 4
+
+training:
+  data_dir: "data/tokenized"   # вместо data/train
+  seq_len: 256
+  batch_size: 8
+  grad_accum_steps: 1
+  learning_rate: 2.0e-4
+  weight_decay: 0.1
+  total_steps: 100000
+  warmup_ratio: 0.1
+  checkpoint_every: 1000
+  checkpoint_dir: "checkpoints/run_bulba1_150m"
+  use_gradient_checkpointing: true
+  use_f16: true
+  optimizer: "muon"
+  

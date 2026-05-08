@@ -11,38 +11,23 @@ from bulba1.model.bit_linear import (
 
 
 class Expert(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        hidden_dim: int,
-        use_bitlinear: bool = True,
-        activation_bits: int = 8,
-        use_relu2: bool = False,
-        use_absmean_down: bool = False,
-    ):
+    # (без изменений)
+    def __init__(self, d_model, hidden_dim, use_bitlinear=True, activation_bits=8,
+                 use_relu2=False, use_absmean_down=False):
         super().__init__()
         Linear = BitLinear if use_bitlinear else nn.Linear
-        self.w1 = (
-            Linear(d_model, hidden_dim, activation_bits=activation_bits)
-            if use_bitlinear
-            else Linear(d_model, hidden_dim, bias=False)
-        )
-        self.w2 = (
-            Linear(d_model, hidden_dim, activation_bits=activation_bits)
-            if use_bitlinear
-            else Linear(d_model, hidden_dim, bias=False)
-        )
-        self.w3 = (
-            Linear(hidden_dim, d_model, activation_bits=activation_bits)
-            if use_bitlinear
-            else Linear(hidden_dim, d_model, bias=False)
-        )
+        self.w1 = (Linear(d_model, hidden_dim, activation_bits=activation_bits)
+                   if use_bitlinear else Linear(d_model, hidden_dim, bias=False))
+        self.w2 = (Linear(d_model, hidden_dim, activation_bits=activation_bits)
+                   if use_bitlinear else Linear(d_model, hidden_dim, bias=False))
+        self.w3 = (Linear(hidden_dim, d_model, activation_bits=activation_bits)
+                   if use_bitlinear else Linear(hidden_dim, d_model, bias=False))
         self.use_relu2 = use_relu2
         self.use_absmean_down = use_absmean_down
         self.use_bitlinear = use_bitlinear
         self.activation_bits = activation_bits
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         if self.use_relu2:
             h = F.relu(self.w1(x)).pow(2) * self.w2(x)
         else:
@@ -53,16 +38,9 @@ class Expert(nn.Module):
 
 
 class GroupedExperts(nn.Module):
-    def __init__(
-        self,
-        num_experts: int,
-        d_model: int,
-        hidden_dim: int,
-        use_bitlinear: bool = True,
-        activation_bits: int = 8,
-        use_relu2: bool = False,
-        use_absmean_down: bool = False,
-    ):
+    # (без изменений)
+    def __init__(self, num_experts, d_model, hidden_dim, use_bitlinear=True,
+                 activation_bits=8, use_relu2=False, use_absmean_down=False):
         super().__init__()
         self.num_experts = num_experts
         self.d_model = d_model
@@ -88,7 +66,7 @@ class GroupedExperts(nn.Module):
         for p in [self.w1, self.w2, self.w3]:
             nn.init.kaiming_uniform_(p, a=5**0.5)
 
-    def forward(self, x: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, expert_ids):
         w1 = ste_b158(self.w1) if self.use_bitlinear else self.w1
         w2 = ste_b158(self.w2) if self.use_bitlinear else self.w2
         w3 = ste_b158(self.w3) if self.use_bitlinear else self.w3
@@ -139,38 +117,23 @@ class GroupedExperts(nn.Module):
 
 
 class SharedExpert(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        hidden_dim: int,
-        use_bitlinear: bool = True,
-        activation_bits: int = 8,
-        use_relu2: bool = False,
-        use_absmean_down: bool = False,
-    ):
+    # (без изменений)
+    def __init__(self, d_model, hidden_dim, use_bitlinear=True, activation_bits=8,
+                 use_relu2=False, use_absmean_down=False):
         super().__init__()
         Linear = BitLinear if use_bitlinear else nn.Linear
-        self.w1 = (
-            Linear(d_model, hidden_dim, bias=False, activation_bits=activation_bits)
-            if use_bitlinear
-            else Linear(d_model, hidden_dim, bias=False)
-        )
-        self.w2 = (
-            Linear(d_model, hidden_dim, bias=False, activation_bits=activation_bits)
-            if use_bitlinear
-            else Linear(d_model, hidden_dim, bias=False)
-        )
-        self.w3 = (
-            Linear(hidden_dim, d_model, bias=False, activation_bits=activation_bits)
-            if use_bitlinear
-            else Linear(hidden_dim, d_model, bias=False)
-        )
+        self.w1 = (Linear(d_model, hidden_dim, bias=False, activation_bits=activation_bits)
+                   if use_bitlinear else Linear(d_model, hidden_dim, bias=False))
+        self.w2 = (Linear(d_model, hidden_dim, bias=False, activation_bits=activation_bits)
+                   if use_bitlinear else Linear(d_model, hidden_dim, bias=False))
+        self.w3 = (Linear(hidden_dim, d_model, bias=False, activation_bits=activation_bits)
+                   if use_bitlinear else Linear(hidden_dim, d_model, bias=False))
         self.use_relu2 = use_relu2
         self.use_absmean_down = use_absmean_down
         self.use_bitlinear = use_bitlinear
         self.activation_bits = activation_bits
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         if self.use_relu2:
             h = F.relu(self.w1(x)).pow(2) * self.w2(x)
         else:
@@ -194,76 +157,76 @@ class MoELayer(nn.Module):
         self.num_shared_experts = getattr(cfg, "num_shared_experts", 2)
         self.router_z_loss_coef = getattr(cfg, "router_z_loss_coef", 0.001)
         self.router_entropy_coef = getattr(cfg, "router_entropy_coef", 0.001)
+        self.use_expert_choice = getattr(cfg, "use_expert_choice", False)
+        self.expert_choice_capacity = getattr(cfg, "expert_choice_capacity", 0)
 
         abits = getattr(cfg, "bitnet_activation_bits", 8)
         use_relu2 = getattr(cfg, "a48_use_relu2_glu", False)
         use_absmean_down = getattr(cfg, "use_bitnet_a48", False)
-        self.shared_experts = nn.ModuleList(
-            [
-                SharedExpert(
-                    cfg.d_model,
-                    cfg.expert_hidden,
-                    cfg.use_bitlinear,
-                    abits,
-                    use_relu2,
-                    use_absmean_down,
-                )
-                for _ in range(self.num_shared_experts)
-            ]
-        )
+
+        self.shared_experts = nn.ModuleList([
+            SharedExpert(cfg.d_model, cfg.expert_hidden, cfg.use_bitlinear,
+                         abits, use_relu2, use_absmean_down)
+            for _ in range(self.num_shared_experts)
+        ])
 
         if self.use_grouped_gemm:
             self.grouped_experts = GroupedExperts(
-                cfg.num_experts,
-                cfg.d_model,
-                cfg.expert_hidden,
-                cfg.use_bitlinear,
-                abits,
-                use_relu2,
-                use_absmean_down,
+                cfg.num_experts, cfg.d_model, cfg.expert_hidden,
+                cfg.use_bitlinear, abits, use_relu2, use_absmean_down
             )
         else:
-            self.experts = nn.ModuleList(
-                [
-                    Expert(
-                        cfg.d_model,
-                        cfg.expert_hidden,
-                        cfg.use_bitlinear,
-                        abits,
-                        use_relu2,
-                        use_absmean_down,
-                    )
-                    for _ in range(cfg.num_experts)
-                ]
-            )
+            self.experts = nn.ModuleList([
+                Expert(cfg.d_model, cfg.expert_hidden, cfg.use_bitlinear,
+                       abits, use_relu2, use_absmean_down)
+                for _ in range(cfg.num_experts)
+            ])
 
         self.gate = nn.Linear(cfg.d_model, cfg.num_experts, bias=False)
 
         if self.use_rex:
-            self.reuse_weight = nn.Parameter(torch.ones(1) * getattr(cfg, "rex_reuse_weight", 0.3))
+            self.reuse_weight = nn.Parameter(
+                torch.ones(1) * getattr(cfg, "rex_reuse_weight", 0.3)
+            )
 
-    def _forward_grouped(
-        self, x_flat: torch.Tensor, topk_idx: torch.Tensor, topk_vals: torch.Tensor
-    ):
-        output = torch.zeros_like(x_flat)
-        for k in range(self.top_k):
-            experts = topk_idx[:, k]
-            weights = topk_vals[:, k]
-            out = self.grouped_experts(x_flat, experts)
-            output = output + out * weights.unsqueeze(-1)
-        return output
+    def _forward_grouped_single_pass(self, x_rep, expert_indices, weights):
+        """Один вызов grouped_experts с уже повторёнными x и индексами."""
+        out = self.grouped_experts(x_rep, expert_indices)
+        return out * weights.unsqueeze(-1)
 
-    def _forward_loop(self, x_flat: torch.Tensor, topk_idx: torch.Tensor, topk_vals: torch.Tensor):
-        output = torch.zeros_like(x_flat)
-        for expert_idx in range(self.num_experts):
-            mask = topk_idx == expert_idx
+    def _forward_loop_single_pass(self, x_rep, expert_indices, weights):
+        out = torch.zeros_like(x_rep)
+        for eid in range(self.num_experts):
+            mask = expert_indices == eid
             if not mask.any():
                 continue
-            token_idx, k_idx = mask.nonzero(as_tuple=True)
-            expert_input = x_flat[token_idx]
-            expert_out = self.experts[expert_idx](expert_input)
-            weights = topk_vals[token_idx, k_idx].unsqueeze(-1)
-            output.index_add_(0, token_idx, expert_out * weights)
+            idx = mask.nonzero(as_tuple=True)[0]
+            e_out = self.experts[eid](x_rep[idx])
+            out.index_add_(0, idx, e_out * weights[idx].unsqueeze(-1))
+        return out
+
+    def _get_expert_output(self, x_flat, topk_idx, topk_vals):
+        """
+        Вычисляет выход экспертов суммированием по k, не дублируя x_flat.
+        Память оптимальна, скорость почти как у единого вызова.
+        """
+        output = torch.zeros_like(x_flat)
+        for k in range(self.top_k):
+            expert_ids = topk_idx[:, k]   # (B*T,)
+            weights = topk_vals[:, k]     # (B*T,)
+
+            if self.use_grouped_gemm:
+                unique_e, counts = torch.unique(expert_ids, return_counts=True)
+                avg_load = counts.float().mean() if len(unique_e) > 0 else 0.0
+                if self.training and avg_load < 4.0:
+                    out_k = self._forward_loop_single_pass(x_flat, expert_ids, weights)
+                else:
+                    out_k = self._forward_grouped_single_pass(x_flat, expert_ids, weights)
+            else:
+                out_k = self._forward_loop_single_pass(x_flat, expert_ids, weights)
+
+            output = output + out_k
+
         return output
 
     def forward(self, x: torch.Tensor, prev_experts=None):
@@ -272,55 +235,77 @@ class MoELayer(nn.Module):
 
         logits = self.gate(x_flat)
         router_prob = F.softmax(logits, dim=-1)
-        topk_vals, topk_idx = torch.topk(router_prob, self.top_k, dim=-1)
-        topk_vals = topk_vals / (topk_vals.sum(dim=-1, keepdim=True) + 1e-9)
 
-        if self.use_grouped_gemm:
-            output = self._forward_grouped(x_flat, topk_idx, topk_vals)
+        if self.use_expert_choice:
+            # Expert Choice Routing (опционально, сейчас не используется)
+            capacity = self.expert_choice_capacity
+            if capacity <= 0:
+                capacity = int(B * T * self.top_k / self.num_experts) + 1
+            topk_vals, topk_idx = torch.topk(router_prob.t(), capacity, dim=1)  # (E, capacity)
+            output = torch.zeros_like(x_flat)
+            for e in range(self.num_experts):
+                tokens = topk_idx[e]
+                if tokens.numel() == 0:
+                    continue
+                vals = topk_vals[e]
+                expert_in = x_flat[tokens]
+                if self.use_grouped_gemm:
+                    e_out = self.grouped_experts(expert_in, torch.full_like(tokens, e))
+                else:
+                    e_out = self.experts[e](expert_in)
+                output.index_add_(0, tokens, e_out * vals.unsqueeze(-1))
+            for se in self.shared_experts:
+                output = output + se(x_flat)
+            log_z = torch.logsumexp(logits, dim=-1)
+            z_loss = self.router_z_loss_coef * (log_z ** 2).mean()
+            total_aux = z_loss
         else:
-            output = self._forward_loop(x_flat, topk_idx, topk_vals)
+            # Token Choice
+            topk_vals, topk_idx = torch.topk(router_prob, self.top_k, dim=-1)
+            topk_vals = topk_vals / (topk_vals.sum(dim=-1, keepdim=True) + 1e-9)
 
-        for se in self.shared_experts:
-            output = output + se(x_flat)
+            # Один проход через экспертов
+            output = self._get_expert_output(x_flat, topk_idx, topk_vals)
 
-        if self.use_rex and prev_experts is not None and len(prev_experts) > 0:
-            with torch.no_grad():
-                prev_out = torch.zeros_like(x_flat)
-                for expert_idx in range(min(self.num_experts, len(prev_experts))):
-                    mask = topk_idx == expert_idx
-                    if not mask.any():
-                        continue
-                    token_idx, k_idx = mask.nonzero(as_tuple=True)
-                    expert_input = x_flat[token_idx]
-                    expert_out = prev_experts[expert_idx](expert_input)
-                    weights = topk_vals[token_idx, k_idx].unsqueeze(-1)
-                    prev_out.index_add_(0, token_idx, expert_out * weights)
-            rw = torch.sigmoid(self.reuse_weight)
-            output = output + prev_out * rw
+            # Shared experts
+            for se in self.shared_experts:
+                output = output + se(x_flat)
 
-        aux_loss = self.num_experts * (router_prob.mean(dim=0) ** 2).sum()
+            # ReX
+            if self.use_rex and prev_experts is not None and len(prev_experts) > 0:
+                with torch.no_grad():
+                    prev_out = torch.zeros_like(x_flat)
+                    for k in range(self.top_k):
+                        k_idx = topk_idx[:, k]   # (B*T,)
+                        k_vals = topk_vals[:, k]
+                        for eid in range(min(self.num_experts, len(prev_experts))):
+                            mask = k_idx == eid
+                            if not mask.any():
+                                continue
+                            idx = mask.nonzero(as_tuple=True)[0]
+                            p_out = prev_experts[eid](x_flat[idx])
+                            prev_out.index_add_(0, idx, p_out * k_vals[idx].unsqueeze(-1))
+                rw = torch.sigmoid(self.reuse_weight)
+                output = output + prev_out * rw
 
-        log_z = torch.logsumexp(logits, dim=-1)
-        z_loss = self.router_z_loss_coef * (log_z**2).mean()
-
-        entropy = -(router_prob * torch.log(router_prob + 1e-10)).sum(dim=-1).mean()
-        entropy_loss = -self.router_entropy_coef * entropy
-
-        total_aux = aux_loss + z_loss + entropy_loss
+            # Aux losses
+            aux_loss = self.num_experts * (router_prob.mean(dim=0) ** 2).sum()
+            log_z = torch.logsumexp(logits, dim=-1)
+            z_loss = self.router_z_loss_coef * (log_z ** 2).mean()
+            entropy = -(router_prob * torch.log(router_prob + 1e-10)).sum(dim=-1).mean()
+            entropy_loss = -self.router_entropy_coef * entropy
+            total_aux = aux_loss + z_loss + entropy_loss
 
         return output.view(B, T, D), total_aux
 
     def get_expert_modules(self):
         if self.use_grouped_gemm:
-
             class ExpertWrapper:
                 def __init__(self, grouped, eid):
                     self.grouped = grouped
                     self.eid = eid
-
                 def __call__(self, x):
                     ids = torch.full((x.size(0),), self.eid, dtype=torch.long, device=x.device)
                     return self.grouped(x, ids)
-
             return [ExpertWrapper(self.grouped_experts, eid) for eid in range(self.num_experts)]
         return list(self.experts)

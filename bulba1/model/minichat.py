@@ -79,7 +79,7 @@ class MiniChat(nn.Module):
         prev_experts = None
         new_past_kvs = [] if use_cache else None
         for i, block in enumerate(self.blocks):
-            if self.cfg.use_gradient_checkpointing and i % checkpoint_every == 0 and not use_cache:
+            if self.cfg.use_gradient_checkpointing and not use_cache:
                 x, aux, _ = torch.utils.checkpoint.checkpoint(
                     block, x, prev_experts, use_reentrant=False
                 )
