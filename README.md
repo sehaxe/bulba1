@@ -1,53 +1,54 @@
 # ⚡ Bulba 1 — Autonomous LLM Training
 
-Self-hosted LLM training on consumer GPU. **225M params, 16 layers** — runs on RTX 5060 Ti 16GB.
+Self-hosted LLM training on consumer GPU. **340M params, 16 layers** — runs on RTX 5060 Ti 16GB.
 
 ## 🚀 Быстрый старт
 
+```bash
 git clone <repo>
 cd bulba1-python
 
-make install          # установить зависимости (Mamba-3 wheel + dev)
+make install          # установить зависимости
 make data             # скачать датасеты
 make build            # собрать датасет и обучить токенизатор
 make install-services # установить systemd-юниты
 
 systemctl --user start bulba1   # запустить обучение
 journalctl --user -u bulba1 -f  # смотреть логи
+```
 
 ## 🚀 Features
 
 | Feature | Description |
-|--------|------------|
-| **Hybrid Architecture** | 75% Mamba-2 SSD + 25% KDA + MoE |
-| **BitNet** | Ternary quantization (-1, 0, +1) |
-| **Smart Checkpoints** | 100/500/1000 steps (adaptive) |
+|---------|-------------|
+| **Hybrid Architecture** | Mamba-2 SSD + KDA + MoE |
+| **MHC** | Multi-head Latent Clustering (DeepSeek style) |
+| **Muon + AdamW** | Custom optimizer with Newton-Schulz |
+| **Gradient Checkpointing** | Memory-efficient training |
 | **Telegram Bot** | Monitor training, generate text |
-| **Zero OOM** | Auto VRAM management |
+| **Smart Checkpoints** | Auto-save with rotation |
 
 ## 📊 Architecture
 
 ```
-Layer 0:   KDA + MoE      (attention)
-Layer 1-3: Mamba-2 SSD
-Layer 4:   KDA + MoE
-Layer 5-7: Mamba-2 SSD
+Layer 0,4,8,12:   KDA + MoE      (attention blocks)
+Layer 1-3,5-7:    Mamba-2 SSD
 ...
 ```
 
 - **Mamba-2 SSD**: Linear complexity, no KV cache
-- **KDA**: Kimi Delta Attention (75% less KV)
-- **MoE**: 16 experts, top-k routing
-- **ReX**: Expert reuse from previous layer
+- **KDA**: Kimi Delta Attention (reduced memory)
+- **MoE**: 16 experts, top-k routing with ReX
 - **MTP**: Multi-token prediction (t+1, t+2)
+- **MHC**: Latent clustering for better representations
 
-## 💾 VRAM Usage
+## 💾 VRAM Usage (RTX 5060 Ti 16GB)
 
 | batch | seq | VRAM |
 |-------|-----|------|
-| 5 | 512 | ~14 GB |
-| 4 | 512 | ~12 GB |
-| 3 | 256 | ~8 GB |
+| 28 | 512 | ~14 GB |
+| 32 | 256 | ~12 GB |
+| 16 | 512 | ~8 GB |
 
 ## 🛠 Setup
 
@@ -68,55 +69,96 @@ systemctl --user daemon-reload
 
 ```bash
 # Direct training
-uv run python run_225m.py
+make train
 
 # Or via systemd
-systemctl --user start bulba1-225m     # Training
-systemctl --user start bulba1-bot       # Bot
+systemctl --user start bulba1        # Training
+systemctl --user start bulba1-bot    # Bot
 
-# Check status
-journalctl --user -u bulba1-225m -f
+# Check logs
+journalctl --user -u bulba1 -f
 ```
 
-## 📁 Structure
+## 📁 Project Structure
 
 ```
-bulba1/
-├── run_225m.py          # Main training script
-├── services/           # Systemd services
+bulba1-python/
+├── configs/
+│   └── default.yaml       # Main training config
 ├── bulba1/
-│   ├── model/         # Architecture (10 files)
-│   ├── training/      # Engine (12 files)
-│   └── cli.py         # CLI
-├── telegram_bot/       # Monitoring bot
-└── tools/             # Utilities
+│   ├── model/            # Model architecture
+│   │   ├── minichat.py   # Main model
+│   │   ├── block.py      # Transformer block
+│   │   ├── mamba.py     # Mamba-2 SSD
+│   │   ├── kda.py        # Kimi Delta Attention
+│   │   ├── moe.py        # Mixture of Experts
+│   │   ├── mhc.py        # Multi-head Latent Clustering
+│   │   └── bit_linear.py # BitNet quantization
+│   ├── training/
+│   │   ├── engine.py     # Training loop
+│   │   ├── optimizer.py  # Muon + AdamW
+│   │   ├── ema.py        # EMA weights
+│   │   └── checkpoint.py # Smart checkpoints
+│   ├── tokenizer.py      # Tokenizer
+│   └── cli.py            # CLI interface
+├── telegram_bot/          # Monitoring bot
+├── tools/                # Profiling tools
+└── services/             # Systemd services
 ```
 
 ## 🤖 Telegram Bot
 
 - `/status` — Training status
-- `/gpu` — GPU info
+- `/gpu` — GPU info  
 - `/logs` — Last log lines
-- `/plot` — Loss graph
 - `/chat [text]` — Generate text
 
 **Admin**: `/train`, `/stop`, `/restart`
 
-## 📝 Config (run_225m.py)
+## 📝 Configuration
 
-```python
-d_model = 768
-n_layers = 16
-n_heads = 12
-num_experts = 16
-batch_size = 5
-seq_len = 512
-learning_rate = 2e-4
+Edit `configs/default.yaml` to customize:
 
-use_mamba = True
-use_bitlinear = True
-use_rex = True
-use_mtp = True
+```yaml
+training:
+  batch_size: 28
+  seq_len: 512
+  learning_rate: 0.0015
+  log_every: 50
+  early_log_steps: 100
+  early_log_every: 10
+
+model:
+  d_model: 768
+  n_layers: 16
+  num_experts: 16
+  use_mhc: true
+  mhc_n: 4
+  use_muon: true
 ```
+
+## 🔧 Profiling
+
+```bash
+# Deep profiling
+uv run python tools/deep_profile.py
+
+# Memory test
+uv run python tools/memory_test.py
+```
+
+## 📈 Training Progress
+
+Check progress via bot or logs:
+```bash
+tail -f logs/bulba1.jsonl
+```
+
+## ⚙️ Requirements
+
+- Python 3.12+
+- CUDA 12.1+
+- 16GB VRAM (RTX 5060 Ti)
+- 32GB RAM
 
 **Git**: https://codeberg.org/quazder/bulba1

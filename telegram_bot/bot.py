@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
 
 # ── Config ──────────────────────────────────────────────────────────
@@ -301,7 +301,7 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def save_checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        result = subprocess.run(["pgrep", "-f", "run_225m.py"], capture_output=True, text=True)
+        result = subprocess.run(["pgrep", "-f", "bulba1.cli"], capture_output=True, text=True)
         pids = result.stdout.strip().split()
         if not pids:
             return await update.message.reply_text("❌ Training not running")

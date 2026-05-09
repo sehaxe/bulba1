@@ -4,43 +4,33 @@
 
 ```
 bulba1-python/
-├── bulba.py                    # Entry point
-├── run_225m.py            # Main training script
-├── pyproject.toml             # Dependencies
-│
-├── bulba1/                    # Main package
-│   ├── cli.py                 # CLI interface
-│   ├── utils/
-│   │   └── config.py          # ModelConfig dataclass
+├── configs/
+│   └── default.yaml        # Training configuration
+├── bulba1/
+│   ├── cli.py               # CLI interface
+│   ├── config.py            # ModelConfig dataclass
 │   ├── model/
-│   │   ├── minichat.py        # MiniChat model
-│   │   ├── block.py           # Transformer block
-│   │   ├── diff_attn.py       # Differential attention
-│   │   ├── moe.py             # MoE + ReX
-│   │   ├── mamba.py           # Mamba-2 SSD
-│   │   ├── bit_linear.py      # BitNet quantization
-│   │   ├── kda.py             # Kimi Delta Attention
-│   │   └── mhc.py             # Manifold Hyper-Connections
+│   │   ├── minichat.py      # Main model
+│   │   ├── block.py         # Transformer block
+│   │   ├── diff_attn.py     # Differential attention
+│   │   ├── moe.py           # MoE + ReX
+│   │   ├── mamba.py         # Mamba-2 SSD
+│   │   ├── bit_linear.py    # BitNet quantization
+│   │   ├── kda.py           # Kimi Delta Attention
+│   │   └── mhc.py           # Multi-head Latent Clustering
 │   ├── training/
-│   │   ├── engine.py          # Training loop
-│   │   ├── optimizer.py       # Muon + AdamW
-│   │   ├── checkpoint.py      # Save/load
-│   │   ├── autotuner.py       # Hardware auto-config
-│   │   └── ema.py             # Exponential moving average
-│   └── data/
-│       └── tokenizer.py       # Tokenizer
+│   │   ├── engine.py        # Training loop
+│   │   ├── optimizer.py      # Muon + AdamW
+│   │   ├── checkpoint.py     # Save/load
+│   │   └── ema.py            # Exponential moving average
+│   └── tokenizer.py          # Tokenizer
 │
 ├── telegram_bot/
-│   └── bot.py                 # Telegram bot
+│   └── bot.py               # Telegram monitoring bot
 │
 ├── tools/
-│   ├── log_viz.py             # Plot training curves
-│   ├── benchmark.py           # Performance benchmarking
-│   └── auto_train.py          # Auto-training script
-│
-├── data/
-│   ├── tokenizer_fast.json    # Trained tokenizer
-│   └── train/                 # Training data (.txt files)
+│   ├── deep_profile.py      # GPU profiling
+│   └── memory_test.py        # Memory testing
 │
 └── docs/
     ├── ARCHITECTURE.md        # Model architecture
