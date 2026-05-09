@@ -352,7 +352,12 @@ class TrainingEngine:
             )
 
             if (step + 1) % checkpoint_every == 0:
-                self._save_checkpoint(step, loss_val, lr, stage)
+                self.checkpoint_mgr.save(
+                    self.model, self.optimizer, step + 1, loss_val,
+                    config={"lr": lr, "stage": stage.name() if hasattr(stage, "name") else str(stage)},
+                    ema=self.ema,
+                )
+                print(f"[CHECKPOINT] Saved at step {step+1}")
 
             if eval_every > 0 and (step + 1) % eval_every == 0 and eval_loader:
                 self._run_eval(eval_loader, eval_prompts)
