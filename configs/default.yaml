@@ -169,8 +169,8 @@ training:
   filtered_dir: "data/filtered"
   train_dir: "data/train"
   log_dir: "logs"
-  num_workers: 6
-  prefetch_factor: 4
+  num_workers: 10
+  prefetch_factor: 6
   data_max_docs: 1000000
   data_max_items_per_source: null
 
