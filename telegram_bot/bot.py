@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 """
-Telegram Bot для мониторинга тренировки Bulba1
-Оптимизированная версия: асинхронный event loop, нет блокирующих subprocess.run
+Telegram Bot для мониторинга тренировки Bulba1 (исправленный)
 """
 
 import os, sys, re, json, time, asyncio, signal, subprocess
 from pathlib import Path
-from datetime import datetime
-from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 
-# ── Config ──────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-LOG_FILE = PROJECT_ROOT / "logs" / "bulba1.log"
-CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "run_bulba1_150m"
+
+LOG_FILE = PROJECT_ROOT / "logs" / "bulba1.jsonl"
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "run_bulba1_340m"
 SERVICE_NAME = "bulba1"
 
 try:
-    from bot_config import BOT_TOKEN, ADMIN_IDS
+    from telegram_bot.bot_config import BOT_TOKEN, ADMIN_IDS
     _config_source = "bot_config.py"
 except ImportError:
     BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -29,9 +26,8 @@ except ImportError:
         ADMIN_IDS = {int(x) for x in os.environ["TELEGRAM_ADMIN_ID"].split(",")}
     _config_source = "environment"
 
-# ── Async systemctl wrapper ─────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────
 async def run_systemctl(*args: str) -> tuple[bool, str]:
-    """Асинхронный вызов systemctl --user"""
     try:
         proc = await asyncio.create_subprocess_exec(
             "systemctl", "--user", *args,
@@ -44,11 +40,8 @@ async def run_systemctl(*args: str) -> tuple[bool, str]:
 
 async def get_service_status() -> str:
     ok, stdout = await run_systemctl("is-active", SERVICE_NAME)
-    if ok:
-        return stdout.strip()
-    return "inactive"
+    return stdout.strip() if ok else "inactive"
 
-# ── GPU / System Info (async) ───────────────────────────────────────
 async def get_gpu_info() -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -58,15 +51,16 @@ async def get_gpu_info() -> str:
             stdout=asyncio.subprocess.PIPE
         )
         stdout, _ = await proc.communicate()
-        name, util, temp, mem_used, mem_total, power = stdout.decode().strip().split(",")
+        parts = stdout.decode().strip().split(",")
+        name, util, temp, mem_used, mem_total, power = parts
         return (
             f"🎮 *{name.strip()}*\n"
             f"Util: `{util.strip()}` | Temp: `{temp.strip()}°C`\n"
             f"VRAM: `{mem_used.strip()}/{mem_total.strip()} MB`\n"
             f"Power: `{power.strip()}`"
         )
-    except Exception as e:
-        return f"❌ {e}"
+    except Exception:
+        return "❌ GPU not available"
 
 async def get_system_info() -> str:
     try:
@@ -75,76 +69,77 @@ async def get_system_info() -> str:
         total = int(lines[0].split()[1]) // 1024
         avail = int(lines[2].split()[1]) // 1024
         used = total - avail
-
         with open("/proc/loadavg") as f:
             load = f.read().split()[0]
         with open("/proc/cpuinfo") as f:
             cores = f.read().count("processor\t:")
-
         proc = await asyncio.create_subprocess_exec(
             "df", "-h", "/", stdout=asyncio.subprocess.PIPE
         )
         stdout, _ = await proc.communicate()
         disk = stdout.decode().splitlines()[1].split()[2:4]
-
         return (
             f"💻 *System*\n"
             f"CPU: `{cores}` cores | Load: `{load}`\n"
             f"RAM: `{used}/{total} MB` ({used*100//total}%)\n"
             f"Disk: `{disk[0]}/{disk[1]}`"
         )
-    except Exception as e:
-        return f"❌ {e}"
+    except Exception:
+        return "❌ System info unavailable"
 
-# ── Training state ──────────────────────────────────────────────────
-def read_log_tail(n: int = 100) -> list[str]:
+def read_jsonl(n: int = 100) -> list[dict]:
     if not LOG_FILE.exists():
         return []
+    records = []
     with open(LOG_FILE, "r") as f:
-        lines = f.readlines()
-    return lines[-n:]
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return records[-n:]
 
 def get_current_step() -> int:
-    for line in reversed(read_log_tail(200)):
-        m = re.search(r"Step (\d+)/", line)
-        if m:
-            return int(m.group(1))
+    recs = read_jsonl(200)
+    for r in reversed(recs):
+        if "step" in r:
+            return r["step"]
     return 0
 
 def get_loss() -> float:
-    for line in reversed(read_log_tail(200)):
-        m = re.search(r"loss=([\d.]+)", line)
-        if m:
-            return float(m.group(1))
+    recs = read_jsonl(200)
+    for r in reversed(recs):
+        if "loss" in r:
+            return r["loss"]
     return 0.0
+
+def get_ema_loss() -> float:
+    recs = read_jsonl(200)
+    for r in reversed(recs):
+        if "ema_loss" in r:
+            return r["ema_loss"] or 0.0
+    return 0.0
+
+def get_tokens_per_sec() -> int:
+    recs = read_jsonl(200)
+    for r in reversed(recs):
+        if "tok_per_sec" in r:
+            return r["tok_per_sec"]
+    return 0
 
 def get_latest_checkpoint() -> int | None:
     if not CHECKPOINT_DIR.exists():
         return None
-    files = sorted(CHECKPOINT_DIR.glob("checkpoint_step_*.safetensors"))
-    if files:
-        return int(files[-1].stem.split("_")[-1])
-    return None
+    files = list(CHECKPOINT_DIR.glob("checkpoint_step_*.safetensors"))
+    if not files:
+        return None
+    best = max(files, key=lambda f: int(re.search(r"step_(\d+)", f.name).group(1)))
+    return int(re.search(r"step_(\d+)", best.name).group(1))
 
-# ── Decorators ──────────────────────────────────────────────────────
-def admin_only(func):
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        if not is_admin(update.effective_user.id):
-            if update.callback_query:
-                await update.callback_query.answer("⛔ Admin only", show_alert=True)
-            else:
-                await update.message.reply_text("⛔ Admin only")
-            return
-        return await func(update, context, *args, **kwargs)
-    return wrapper
-
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-# ── Rate limiter ────────────────────────────────────────────────────
 class RateLimiter:
-    def __init__(self, max_calls: int = 10, window: float = 60.0):
+    def __init__(self, max_calls: int = 15, window: float = 60.0):
         self.max_calls = max_calls
         self.window = window
         self.history: dict[int, list[float]] = {}
@@ -159,232 +154,191 @@ class RateLimiter:
         self.history[user_id].append(now)
         return True
 
-    def remaining(self, user_id: int) -> int:
-        now = time.time()
-        if user_id not in self.history:
-            return self.max_calls
-        active = len([t for t in self.history[user_id] if now - t < self.window])
-        return max(0, self.max_calls - active)
-
 limiter = RateLimiter(max_calls=15, window=60.0)
-chat_limiter = RateLimiter(max_calls=5, window=3600.0)  # 5 chats per hour
+
+# Безопасный способ отправить сообщение
+async def _reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs) -> None:
+    """Отправляет сообщение в тот же чат, откуда пришёл запрос."""
+    if update.callback_query:
+        msg = update.callback_query.message
+    else:
+        msg = update.message
+    if msg:
+        await msg.reply_text(text, **kwargs)
 
 # ── Keyboards ───────────────────────────────────────────────────────
-def main_keyboard(is_admin_user: bool) -> InlineKeyboardMarkup:
+def main_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton("📊 Status", callback_data="status"),
          InlineKeyboardButton("🖥 GPU", callback_data="gpu")],
-        [InlineKeyboardButton("💻 System", callback_data="system"),
+        [InlineKeyboardButton("💻 System", callback_data="sys"),
          InlineKeyboardButton("⏱ ETA", callback_data="eta")],
         [InlineKeyboardButton("📝 Logs", callback_data="logs"),
          InlineKeyboardButton("📈 Plot", callback_data="plot")],
         [InlineKeyboardButton("📦 Checkpoint", callback_data="checkpoint")],
     ]
-    if is_admin_user:
-        buttons += [
-            [InlineKeyboardButton("▶ Start", callback_data="train"),
-             InlineKeyboardButton("⏹ Stop", callback_data="stop")],
-            [InlineKeyboardButton("🔄 Restart", callback_data="restart"),
-             InlineKeyboardButton("💾 Save", callback_data="save")],
-        ]
     return InlineKeyboardMarkup(buttons)
 
 # ── Command handlers ────────────────────────────────────────────────
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = main_keyboard(is_admin(update.effective_user.id))
-    await update.message.reply_text("🎛 *Bulba1 Control Panel*", reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-
-async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_command(update, context)
-
-@RateLimiter().check  # not using decorator properly, will fix below
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not limiter.check(user_id):
-        await update.message.reply_text("⏳ Slow down! Try again in a moment.")
-        return
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await get_service_status()
-    gpu = await get_gpu_info()
     step = get_current_step()
     loss = get_loss()
+    ema = get_ema_loss()
+    tok_s = get_tokens_per_sec()
     ckpt = get_latest_checkpoint()
-
-    msg = (
-        f"{'✅' if status == 'active' else '❌'} *Training Status*\n\n"
+    gpu = await get_gpu_info()
+    text = (
+        f"{'✅' if status == 'active' else '❌'} *Bulba1 Control Panel*\n\n"
         f"Service: `{status}`\n"
-        f"{gpu}\n"
         f"Step: `{step}/100000`\n"
         f"Loss: `{loss:.4f}`\n"
+        f"EMA Loss: `{ema:.4f}`\n"
+        f"Speed: `{tok_s} tok/s`\n"
+        f"Checkpoint: `{ckpt or 'N/A'}`\n\n"
+        f"{gpu}"
+    )
+    await _reply(update, context, text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_keyboard())
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id): return
+    status = await get_service_status()
+    step = get_current_step()
+    loss = get_loss()
+    ema = get_ema_loss()
+    tok_s = get_tokens_per_sec()
+    ckpt = get_latest_checkpoint()
+    gpu = await get_gpu_info()
+    text = (
+        f"{'✅' if status == 'active' else '❌'} *Training Status*\n\n"
+        f"Service: `{status}`\n{gpu}\n"
+        f"Step: `{step}/100000`\n"
+        f"Loss: `{loss:.4f}` | EMA: `{ema:.4f}`\n"
+        f"Speed: `{tok_s} tok/s`\n"
         f"Checkpoint: `{ckpt or 'N/A'}`"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await _reply(update, context, text, parse_mode=ParseMode.MARKDOWN)
 
-async def gpu_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not limiter.check(update.effective_user.id):
-        return await update.message.reply_text("⏳ Slow down!")
+async def gpu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id): return
     msg = await get_gpu_info()
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await _reply(update, context, msg, parse_mode=ParseMode.MARKDOWN)
 
-async def system_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not limiter.check(update.effective_user.id):
-        return await update.message.reply_text("⏳ Slow down!")
+async def sys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id): return
     msg = await get_system_info()
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await _reply(update, context, msg, parse_mode=ParseMode.MARKDOWN)
 
-async def eta_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not limiter.check(update.effective_user.id):
-        return await update.message.reply_text("⏳ Slow down!")
+async def eta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id): return
     step = get_current_step()
     loss = get_loss()
     remaining = 100000 - step
-    # грубая оценка: ~0.3 сек/шаг с учётом предтокенизации
-    eta_sec = remaining * 0.3
-    hours, mins = int(eta_sec // 3600), int((eta_sec % 3600) // 60)
-    await update.message.reply_text(
-        f"⏱ *ETA*\nStep: `{step}/100000`\nLoss: `{loss:.4f}`\nRemaining: `{hours}h {mins}m`",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    tok_s = get_tokens_per_sec()
+    if tok_s > 0:
+        eta_sec = remaining * 360 / tok_s
+        hours, mins = int(eta_sec // 3600), int((eta_sec % 3600) // 60)
+    else:
+        hours, mins = 0, 0
+    text = f"⏱ *ETA*\nStep: `{step}/100000`\nLoss: `{loss:.4f}`\nRemaining: `{hours}h {mins}m`"
+    await _reply(update, context, text, parse_mode=ParseMode.MARKDOWN)
 
-async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not limiter.check(update.effective_user.id):
-        return await update.message.reply_text("⏳ Slow down!")
+async def logs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id): return
     n = min(int(context.args[0]) if context.args else 10, 50)
-    lines = read_log_tail(n)
-    if not lines:
-        return await update.message.reply_text("❌ Log file not found")
-    text = "".join(lines[-n:]).replace("_", "\\_").replace("*", "•")
-    await update.message.reply_text(f"📝 Last {n} lines:\n\n{text}")
+    recs = read_jsonl(n)
+    if not recs:
+        return await _reply(update, context, "❌ Log file not found")
+    lines = [f"Step {r['step']}: loss={r['loss']:.4f} ema={r.get('ema_loss',0):.4f} tok/s={r['tok_per_sec']}" for r in recs]
+    await _reply(update, context, f"📝 Last {n} records:\n\n`{chr(10).join(lines[-n:])}`", parse_mode=ParseMode.MARKDOWN)
 
-async def plot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not limiter.check(update.effective_user.id):
-        return await update.message.reply_text("⏳ Slow down!")
-    await update.message.reply_text("🎨 Generating plot...")
-    sys.path.insert(0, str(PROJECT_ROOT))
-    from tools.log_viz import parse_log, generate_plots
-    if not LOG_FILE.exists():
-        return await update.message.reply_text("❌ Log file not found")
-    df = parse_log(str(LOG_FILE))
-    if df is None or len(df) == 0:
-        return await update.message.reply_text("❌ No data")
-    output = PROJECT_ROOT / "logs" / "bulba1_plot.png"
-    generate_plots(df, str(output), "Bulba1 Training")
-    await update.message.reply_photo(photo=open(output, "rb"))
+async def plot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id): return
+    await _reply(update, context, "🎨 Generating plot...")
+    result = subprocess.run(
+        ["uv", "run", "tools/log_viz.py", "-f", str(LOG_FILE), "-o", str(PROJECT_ROOT / "logs" / "bulba1_plot.png")],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        return await _reply(update, context, f"❌ Plot error: {result.stderr}")
+    plot_path = PROJECT_ROOT / "logs" / "bulba1_plot.png"
+    if plot_path.exists():
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(plot_path, "rb"))
+    else:
+        await _reply(update, context, "❌ Plot file not created")
 
-async def checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not limiter.check(update.effective_user.id):
-        return await update.message.reply_text("⏳ Slow down!")
+async def checkpoint_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not limiter.check(update.effective_user.id): return
     ckpt = get_latest_checkpoint()
     step = get_current_step()
     loss = get_loss()
-    await update.message.reply_text(
-        f"📦 *Checkpoint*\nLatest: `{ckpt or 'N/A'}`\nStep: `{step}`\nLoss: `{loss:.4f}`",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await _reply(update, context,
+                 f"📦 *Checkpoint*\nLatest: `{ckpt or 'N/A'}`\nStep: `{step}`\nLoss: `{loss:.4f}`",
+                 parse_mode=ParseMode.MARKDOWN)
+
+# ── Button handler ──────────────────────────────────────────────────
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    # Создаём фейковый update с сообщением для команд
+    # Просто передаём управление той же функции, она справится через _reply
+    if data == "status":
+        await status_cmd(update, context)
+    elif data == "gpu":
+        await gpu_cmd(update, context)
+    elif data == "sys":
+        await sys_cmd(update, context)
+    elif data == "eta":
+        await eta_cmd(update, context)
+    elif data == "logs":
+        await logs_cmd(update, context)
+    elif data == "plot":
+        await plot_cmd(update, context)
+    elif data == "checkpoint":
+        await checkpoint_cmd(update, context)
 
 # ── Admin commands ──────────────────────────────────────────────────
+def admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in ADMIN_IDS:
+            await _reply(update, context, "⛔ Admin only")
+            return
+        return await func(update, context)
+    return wrapper
+
 @admin_only
-async def train_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def train_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, _ = await run_systemctl("start", SERVICE_NAME)
-    await update.message.reply_text("▶ Training started" if ok else "❌ Failed to start")
+    await _reply(update, context, "▶ Training started" if ok else "❌ Failed")
 
 @admin_only
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, _ = await run_systemctl("stop", SERVICE_NAME)
-    await update.message.reply_text("⏹ Training stopped" if ok else "❌ Failed to stop")
+    await _reply(update, context, "⏹ Stopped" if ok else "❌ Failed")
 
 @admin_only
-async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, _ = await run_systemctl("restart", SERVICE_NAME)
-    await update.message.reply_text("🔄 Training restarted" if ok else "❌ Failed to restart")
+    await _reply(update, context, "🔄 Restarted" if ok else "❌ Failed")
 
 @admin_only
-async def save_checkpoint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = subprocess.run(["pgrep", "-f", "bulba1.cli"], capture_output=True, text=True)
         pids = result.stdout.strip().split()
         if not pids:
-            return await update.message.reply_text("❌ Training not running")
+            return await _reply(update, context, "❌ Training not running")
         os.kill(int(pids[0]), signal.SIGUSR1)
-        await update.message.reply_text("💾 Checkpoint saved")
+        await _reply(update, context, "💾 Checkpoint saved")
     except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
-
-async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id) and not chat_limiter.check(user_id):
-        return await update.message.reply_text("⏳ Chat daily limit reached")
-    checkpoints = sorted(
-        [int(f.stem.split("_")[-1]) for f in CHECKPOINT_DIR.glob("checkpoint_step_*.safetensors")]
-    ) if CHECKPOINT_DIR.exists() else []
-    if not checkpoints:
-        return await update.message.reply_text("No checkpoints yet")
-    # show last 5
-    ckpts = checkpoints[-5:]
-    buttons = [[InlineKeyboardButton(f"Step {s}", callback_data=f"chat_{s}")] for s in ckpts]
-    await update.message.reply_text(
-        "Select checkpoint to chat with:", reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-# ── Callback query handler ─────────────────────────────────────────
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-
-    # Map callback data to handler functions
-    handlers = {
-        "status": status_command,
-        "gpu": gpu_info_command,
-        "system": system_info_command,
-        "eta": eta_command,
-        "logs": logs_command,
-        "plot": plot_command,
-        "checkpoint": checkpoint_command,
-        "train": train_command,
-        "stop": stop_command,
-        "restart": restart_command,
-        "save": save_checkpoint_command,
-    }
-    if data in handlers:
-        # Передаём управление через fake update
-        update.message = query.message
-        update.effective_user = query.from_user
-        # Для команд, которые читают context.args – не используется в button handlers
-        await handlers[data](update, context)
-    elif data.startswith("chat_"):
-        step = int(data.split("_")[1])
-        context.user_data["chat_step"] = step
-        await query.message.reply_text(f"Checkpoint {step} selected. Type your message:")
-
-# ── Message handler for chat ────────────────────────────────────────
-async def handle_chat_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    step = context.user_data.pop("chat_step", None)
-    if step is None:
-        return await update.message.reply_text("Use /chat to start a conversation")
-    prompt = update.message.text.strip()
-    await update.message.reply_text("🧠 Thinking...")
-    # run in thread to avoid blocking
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: subprocess.run(
-        [sys.executable, "-m", "bulba1.cli", "--steps", "0", "--generate",
-         "--prompt", prompt, "--gen-max-tokens", "100", "--checkpoint", str(step),
-         "--resume", "--device", "cpu"],
-        capture_output=True, text=True, timeout=180
-    ))
-    output = None
-    for line in result.stdout.splitlines():
-        if "Generated:" in line:
-            output = line.split("Generated:", 1)[1].strip()
-    await update.message.reply_text(output or f"Error: {result.stderr[:200]}")
+        await _reply(update, context, f"❌ {e}")
 
 # ── Main ────────────────────────────────────────────────────────────
 def main():
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--token")
-    parser.add_argument("--poll", action="store_true")
     args = parser.parse_args()
 
     token = args.token or BOT_TOKEN
@@ -393,30 +347,24 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # User commands
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("panel", panel_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("gpu", gpu_info_command))
-    app.add_handler(CommandHandler("system", system_info_command))
-    app.add_handler(CommandHandler("eta", eta_command))
-    app.add_handler(CommandHandler("logs", logs_command))
-    app.add_handler(CommandHandler("plot", plot_command))
-    app.add_handler(CommandHandler("checkpoint", checkpoint_command))
-    # Admin commands
-    app.add_handler(CommandHandler("train", train_command))
-    app.add_handler(CommandHandler("stop", stop_command))
-    app.add_handler(CommandHandler("restart", restart_command))
-    app.add_handler(CommandHandler("save", save_checkpoint_command))
-    # Chat
-    app.add_handler(CommandHandler("chat", chat_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_input))
-    # Callback
-    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("gpu", gpu_cmd))
+    app.add_handler(CommandHandler("sys", sys_cmd))
+    app.add_handler(CommandHandler("eta", eta_cmd))
+    app.add_handler(CommandHandler("logs", logs_cmd))
+    app.add_handler(CommandHandler("plot", plot_cmd))
+    app.add_handler(CommandHandler("checkpoint", checkpoint_cmd))
+    # Admin
+    app.add_handler(CommandHandler("train", train_cmd))
+    app.add_handler(CommandHandler("stop", stop_cmd))
+    app.add_handler(CommandHandler("restart", restart_cmd))
+    app.add_handler(CommandHandler("save", save_cmd))
+    # Buttons
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     print(f"🤖 Bulba1 Bot ({_config_source})")
     app.run_polling()
 
 if __name__ == "__main__":
-    import argparse
     main()

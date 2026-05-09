@@ -5,8 +5,8 @@
 BOT_TOKEN = ""  # e.g., "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 
 # Your Telegram user ID (from @userinfobot)
-# Add your ID, remove mine
-ADMIN_IDS = set()  # e.g., {5554531940}
+# Add your ID
+ADMIN_IDS = {} 
 
 # Optional: Specific chat ID for one-way notifications
 # TELEGRAM_CHAT_ID = ""
