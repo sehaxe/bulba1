@@ -3,8 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
-from bulba1.model.bit_linear import make_linear, activation_quant_ste, QuantizedKVCache
-
+from bulba1.model.bit_linear import BitLinear, ste_b158, make_linear, quantize_ste_absmax
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):

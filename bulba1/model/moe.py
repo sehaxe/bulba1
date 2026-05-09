@@ -195,14 +195,15 @@ class MoELayer(nn.Module):
         return out * weights.unsqueeze(-1)
 
     def _forward_loop_single_pass(self, x_rep, expert_indices, weights):
-        out = torch.zeros_like(x_rep)
+        out = torch.zeros(x_rep.shape[0], x_rep.shape[1], device=x_rep.device, dtype=x_rep.dtype)
         for eid in range(self.num_experts):
             mask = expert_indices == eid
             if not mask.any():
                 continue
             idx = mask.nonzero(as_tuple=True)[0]
             e_out = self.experts[eid](x_rep[idx])
-            out.index_add_(0, idx, e_out * weights[idx].unsqueeze(-1))
+            w = weights[idx].unsqueeze(-1).to(out.dtype)
+            out.index_add_(0, idx, e_out.to(out.dtype) * w)
         return out
 
     def _get_expert_output(self, x_flat, topk_idx, topk_vals):
@@ -210,7 +211,7 @@ class MoELayer(nn.Module):
         Вычисляет выход экспертов суммированием по k, не дублируя x_flat.
         Память оптимальна, скорость почти как у единого вызова.
         """
-        output = torch.zeros_like(x_flat)
+        output = torch.zeros(x_flat.shape[0], x_flat.shape[1], device=x_flat.device, dtype=x_flat.dtype)
         for k in range(self.top_k):
             expert_ids = topk_idx[:, k]   # (B*T,)
             weights = topk_vals[:, k]     # (B*T,)
@@ -242,7 +243,7 @@ class MoELayer(nn.Module):
             if capacity <= 0:
                 capacity = int(B * T * self.top_k / self.num_experts) + 1
             topk_vals, topk_idx = torch.topk(router_prob.t(), capacity, dim=1)  # (E, capacity)
-            output = torch.zeros_like(x_flat)
+            output = torch.zeros(x_flat.shape[0], x_flat.shape[1], device=x_flat.device, dtype=x_flat.dtype)
             for e in range(self.num_experts):
                 tokens = topk_idx[e]
                 if tokens.numel() == 0:
@@ -253,7 +254,7 @@ class MoELayer(nn.Module):
                     e_out = self.grouped_experts(expert_in, torch.full_like(tokens, e))
                 else:
                     e_out = self.experts[e](expert_in)
-                output.index_add_(0, tokens, e_out * vals.unsqueeze(-1))
+                output.index_add_(0, tokens, (e_out * vals.unsqueeze(-1)).to(output.dtype))
             for se in self.shared_experts:
                 output = output + se(x_flat)
             log_z = torch.logsumexp(logits, dim=-1)
@@ -274,7 +275,7 @@ class MoELayer(nn.Module):
             # ReX
             if self.use_rex and prev_experts is not None and len(prev_experts) > 0:
                 with torch.no_grad():
-                    prev_out = torch.zeros_like(x_flat)
+                    prev_out = torch.zeros(x_flat.shape[0], x_flat.shape[1], device=x_flat.device, dtype=x_flat.dtype)
                     for k in range(self.top_k):
                         k_idx = topk_idx[:, k]   # (B*T,)
                         k_vals = topk_vals[:, k]
@@ -284,7 +285,7 @@ class MoELayer(nn.Module):
                                 continue
                             idx = mask.nonzero(as_tuple=True)[0]
                             p_out = prev_experts[eid](x_flat[idx])
-                            prev_out.index_add_(0, idx, p_out * k_vals[idx].unsqueeze(-1))
+                            prev_out.index_add_(0, idx, (p_out * k_vals[idx].unsqueeze(-1)).to(prev_out.dtype))
                 rw = torch.sigmoid(self.reuse_weight)
                 output = output + prev_out * rw
 

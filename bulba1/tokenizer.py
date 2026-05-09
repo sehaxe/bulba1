@@ -332,31 +332,46 @@ class SmartTokenizer:
         self.vocab_size = final_vocab
         return self._analysis_results
     
+    def _file_line_iterator(self, files, max_lines=None):
+        """Генератор строк из многих файлов, без загрузки в память."""
+        count = 0
+        for path in files:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        yield line
+                        count += 1
+                        if max_lines and count >= max_lines:
+                            return
+
     def train(self, files: List[str], force_vocab_size: Optional[int] = None):
-        """Train tokenizer, optionally with auto-detection."""
+        """Тренирует токенизатор потоково, без OOM."""
         os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-        
-        # Auto-detect vocab size if requested
+
         if self.auto_detect and force_vocab_size is None:
             analysis = self.analyze(files)
             print(f"[SmartTokenizer] Auto-selected vocab_size={self.vocab_size}")
         elif force_vocab_size is not None:
             self.vocab_size = force_vocab_size
-        
-        # Train final tokenizer
-        print(f"[SmartTokenizer] Training final tokenizer with vocab_size={self.vocab_size}")
-        
+
+        print(f"[SmartTokenizer] Training final tokenizer with vocab_size={self.vocab_size} (streaming)...")
+
         tokenizer = self._create_base_tokenizer()
         trainer = trainers.BpeTrainer(
             vocab_size=self.vocab_size,
             special_tokens=["<pad>", "<s>", "</s>", "<unk>"],
             min_frequency=2,
         )
-        
-        tokenizer.train(files, trainer)
+
+        # Потоковая тренировка: берём первые 5 миллионов строк для скорости,
+        # этого более чем достаточно для BPE и не перегружает память.
+        max_examples = 5_000_000
+        iterator = self._file_line_iterator(files, max_lines=max_examples)
+        tokenizer.train_from_iterator(iterator, trainer)
+
         tokenizer.save(self.model_path)
         self.tokenizer = tokenizer
-        
         print(f"[SmartTokenizer] Saved to {self.model_path}")
     
     def load(self):

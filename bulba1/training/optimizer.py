@@ -4,13 +4,7 @@ from torch.optim import Optimizer
 
 
 class MuonOptimizer(Optimizer):
-    """Muon optimizer with momentum and per-parameter RMS scaling.
-
-    Key improvements from "Muon is Scalable for LLM Training" (Moonlight paper):
-    1. Momentum: EMA of gradients before Newton-Schulz
-    2. Per-parameter update scale: rescale Newton-Schulz output to match grad RMS
-    3. Weight decay: standard decoupled weight decay (critical for scale)
-    """
+    """Muon optimizer with momentum, per-parameter RMS scaling, and compiled Newton-Schulz."""
 
     def __init__(
         self, params, lr=3e-4, weight_decay=0.1, momentum=0.95, nesterov=True, ns_steps=5, min_dim=2
@@ -60,8 +54,7 @@ class MuonOptimizer(Optimizer):
                     g = buf
 
                 if g.dim() == 2 and min(g.size(0), g.size(1)) >= min_dim:
-                    update = self.newton_schulz(g, ns_steps)
-
+                    update = self._newton_schulz(g, ns_steps)
                     A, B = g.shape
                     scale = 0.2 * math.sqrt(max(A, B))
                     update.mul_(scale)
@@ -75,9 +68,9 @@ class MuonOptimizer(Optimizer):
 
         return loss
 
-    def newton_schulz(self, G: torch.Tensor, steps: int = 5) -> torch.Tensor:
+    @staticmethod
+    def _newton_schulz(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
         a, b, c = (3.4445, -4.7750, 2.0315)
-        # Use bfloat16 for speed on CUDA (Newton-Schulz is compute-bound)
         X = G.bfloat16() if G.device.type == "cuda" else G
         transpose = X.size(0) > X.size(1)
         if transpose:
@@ -93,12 +86,7 @@ class MuonOptimizer(Optimizer):
 
 
 class CombinedOptimizer:
-    """Routes 2D weight matrices to Muon, everything else to AdamW.
-
-    Per Moonlight paper:
-    - Muon: all 2D weight matrices (W_q, W_k, W_v, W_o, W_moe, W_ffn, etc.)
-    - AdamW: embeddings, lm_head, biases, norms, non-matrix params
-    """
+    """Все 2D матрицы → Muon, остальное → AdamW (без 8-битных фолбэков)."""
 
     def __init__(self, model, cfg):
         muon_params = []
@@ -107,13 +95,12 @@ class CombinedOptimizer:
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-            # Muon: 2D matrices with both dims >= 2 (all weight matrices)
-            # AdamW: embeddings, head, biases, norms, 1D/ND params
-            is_2d_matrix = p.dim() == 2 and min(p.size(0), p.size(1)) >= 2
-            is_embedding_or_head = (
-                "embed" in name or "head" in name or "lm_" in name or "bias" in name
+
+            # Исключения: всё, что не обрабатывается Muon
+            is_excluded = any(
+                pattern in name for pattern in ("embed", "head", "lm_", "bias", "norm", "A_log", "D")
             )
-            if is_2d_matrix and not is_embedding_or_head:
+            if p.dim() == 2 and min(p.size(0), p.size(1)) >= 2 and not is_excluded:
                 muon_params.append(p)
             else:
                 adamw_params.append(p)
@@ -139,11 +126,7 @@ class CombinedOptimizer:
                 betas=(cfg.beta1, cfg.beta2),
                 eps=cfg.eps,
                 weight_decay=cfg.weight_decay,
-                fused=(
-                    cfg.use_f16
-                    and hasattr(torch.cuda, "is_available")
-                    and torch.cuda.is_available()
-                ),
+                fused=True if torch.cuda.is_available() else False,
             )
             if adamw_params
             else None
@@ -172,3 +155,12 @@ class CombinedOptimizer:
             self.muon.load_state_dict(state_dict["muon"])
         if self.adamw and state_dict.get("adamw"):
             self.adamw.load_state_dict(state_dict["adamw"])
+
+    @property
+    def param_groups(self):
+        groups = []
+        if self.muon is not None:
+            groups.extend(self.muon.param_groups)
+        if self.adamw is not None:
+            groups.extend(self.adamw.param_groups)
+        return groups

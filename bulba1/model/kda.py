@@ -2,32 +2,64 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from bulba1.model.bit_linear import make_linear, quantize_ste_absmax
-
+from bulba1.model.bit_linear import make_linear
 
 def _parallel_scan_affine(a, B):
     B_batch, T, H, D, _ = B.shape
     if T == 1:
         return B
+
     a_cum = a.clone()
     B_cum = B.clone()
+
     step = 1
     while step < T:
         a_left = a_cum.roll(step, dims=1)
         B_left = B_cum.roll(step, dims=1)
+
         a_left[:, :step] = 1.0
         B_left[:, :step] = 0.0
+
         a_old = a_cum
         B_old = B_cum
+
         a_cum = a_left * a_old
         B_cum = a_old * B_left + B_old
+
         step *= 2
+
     return B_cum
+
+
+class _RoPEHelper:
+    """RoPE implementaton that works across all PyTorch versions."""
+    def __init__(self, theta=10000.0):
+        self.theta = theta
+
+    def __call__(self, q, k):
+        B, H, T, D = q.shape
+        position = torch.arange(T, device=q.device).float().view(T, 1)
+        dim = torch.arange(0, D, 2).float().to(q.device)
+        freqs = 1.0 / (self.theta ** (dim / D))
+        angles = position * freqs
+        cos = torch.cos(angles).view(1, 1, T, -1)
+        sin = torch.sin(angles).view(1, 1, T, -1)
+
+        def rotate_half(x):
+            x1 = x[..., ::2]
+            x2 = x[..., 1::2]
+            rotated = torch.empty_like(x)
+            rotated[..., ::2] = x1 * cos - x2 * sin
+            rotated[..., 1::2] = x1 * sin + x2 * cos
+            return rotated
+
+        return rotate_half(q), rotate_half(k)
 
 
 class KimiDeltaAttention(nn.Module):
     def __init__(self, cfg):
         super().__init__()
+        self.cfg = cfg
         self.n_heads = cfg.n_heads
         self.d_model = cfg.d_model
         self.head_dim = cfg.d_model // cfg.n_heads
@@ -57,6 +89,24 @@ class KimiDeltaAttention(nn.Module):
         self.norm_q = nn.RMSNorm(self.head_dim)
         self.norm_k = nn.RMSNorm(self.head_dim)
 
+    def _forward_sequential(self, q, k, v, gate_f, gate_i=None):
+        B, H, T, D = q.shape
+        S = torch.zeros(B, H, D, D, device=q.device, dtype=q.dtype)
+        ys = []
+        for t in range(T):
+            k_t = k[:, :, t, :].unsqueeze(-1)
+            v_t = v[:, :, t, :].unsqueeze(-2)
+            f = gate_f[:, t].unsqueeze(-1).unsqueeze(-1)
+            if gate_i is not None:
+                i = gate_i[:, t].unsqueeze(-1).unsqueeze(-1)
+            else:
+                i = 1 - f
+            S = f * S + i * (k_t @ v_t)
+            q_t = q[:, :, t, :].unsqueeze(-1)
+            y = (q_t.transpose(-2, -1) @ S).squeeze(-2)
+            ys.append(y)
+        return torch.stack(ys, dim=2)
+
     def _forward_parallel(self, q, k, v, gate_f, gate_i=None):
         B, H, T, D = q.shape
         if gate_i is None:
@@ -69,8 +119,12 @@ class KimiDeltaAttention(nn.Module):
             a = f
             B_mat = i * (k.unsqueeze(-1) @ v.unsqueeze(-2))
 
+        # Защита от численного взрыва
+        B_mat = torch.clamp(B_mat, min=-1e4, max=1e4)
+
         a = a.permute(0, 2, 1, 3, 4)
         B_mat = B_mat.permute(0, 2, 1, 3, 4)
+
         S = _parallel_scan_affine(a, B_mat)
         S = S.permute(0, 2, 1, 3, 4)
 
@@ -91,6 +145,7 @@ class KimiDeltaAttention(nn.Module):
         k = self.norm_k(k)
 
         if self.use_quantized_kv_cache:
+            from bulba1.model.bit_linear import quantize_ste_absmax
             k = quantize_ste_absmax(k, self.kv_cache_bits)
             v = quantize_ste_absmax(v, self.kv_cache_bits)
 
@@ -99,8 +154,9 @@ class KimiDeltaAttention(nn.Module):
         v = v.transpose(1, 2)
 
         if self.use_rope:
-            q = torch.ao.nn.functional.rope(q, dim=-1, theta=10000.0)
-            k = torch.ao.nn.functional.rope(k, dim=-1, theta=10000.0)
+            if not hasattr(self, '_rope_helper'):
+                self._rope_helper = _RoPEHelper()
+            q, k = self._rope_helper(q, k)
 
         gate_logits = self.gate_proj(x).view(B, T, H, -1)
         if self.use_double_gate:
@@ -119,21 +175,3 @@ class KimiDeltaAttention(nn.Module):
 
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
         return self.o_proj(out), None, torch.tensor(0.0, device=x.device)
-
-    def _forward_sequential(self, q, k, v, gate_f, gate_i=None):
-        B, H, T, D = q.shape
-        S = torch.zeros(B, H, D, D, device=q.device, dtype=q.dtype)
-        ys = []
-        for t in range(T):
-            k_t = k[:, :, t, :].unsqueeze(-1)
-            v_t = v[:, :, t, :].unsqueeze(-2)
-            f = gate_f[:, t].unsqueeze(-1).unsqueeze(-1)
-            if gate_i is not None:
-                i = gate_i[:, t].unsqueeze(-1).unsqueeze(-1)
-            else:
-                i = 1 - f
-            S = f * S + i * (k_t @ v_t)
-            q_t = q[:, :, t, :].unsqueeze(-1)
-            y = (q_t.transpose(-2, -1) @ S).squeeze(-2)
-            ys.append(y)
-        return torch.stack(ys, dim=2)

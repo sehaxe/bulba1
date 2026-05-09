@@ -68,17 +68,15 @@ def q_fp4_ste(x: torch.Tensor, M: int = 2, E: int = 2) -> torch.Tensor:
 
 
 def topk_sparsify(x: torch.Tensor, k: float = 0.5) -> torch.Tensor:
-    """Retain top-K fraction of activations, set rest to zero."""
     if not x.requires_grad:
-        abs_x = x.abs()
+        abs_x = x.abs().float()
         threshold = torch.quantile(abs_x, 1.0 - k, dim=-1, keepdim=True)
         mask = abs_x >= threshold
-        return x * mask
-    abs_x = x.abs()
+        return x * mask.to(x.dtype)
+    abs_x = x.abs().float()
     threshold = torch.quantile(abs_x, 1.0 - k, dim=-1, keepdim=True)
     mask = abs_x >= threshold
-    return (mask.float() * x - x).detach() + x
-
+    return (mask.to(x.dtype) * x - x).detach() + x
 
 def quantize_ste_absmax(x: torch.Tensor, num_bits: int = 8) -> torch.Tensor:
     """Symmetric absmax quantization with straight-through estimator."""
@@ -159,7 +157,8 @@ class BitLinear(nn.Module):
             nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w = ste_b158(self.weight)
+        w = ste_b158(self.weight).to(x.dtype)  # Match input dtype
+        w = w.to(x.dtype)   # ← критично для autocast BF16
         if self.quantize_input:
             x = activation_quant_ste(x, self.activation_bits)
         return F.linear(x, w, self.bias)

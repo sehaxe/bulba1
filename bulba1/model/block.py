@@ -4,7 +4,9 @@ from bulba1.model.diff_attn import DiffAttention, RMSNorm
 from bulba1.model.moe import MoELayer
 from bulba1.model.mamba import MambaBlock
 from bulba1.model.kda import KimiDeltaAttention
-from bulba1.model.bit_linear import q_int4_v2, hadamard_transform
+from bulba1.model.mhc import MHC
+from bulba1.model.bit_linear import q_int4_v2, hadamard_transform, topk_sparsify
+
 
 class Block(nn.Module):
     def __init__(self, cfg, layer_idx: int = 0):
@@ -35,47 +37,79 @@ class Block(nn.Module):
 
         self.use_mhc = getattr(cfg, "use_mhc", True)
         if self.use_mhc:
-            from bulba1.model.mhc import MHC
-            self.mhc = MHC(cfg.d_model)
-        else:
-            self.mhc = None
+            self.mhc = MHC(cfg)
 
         self.use_bitnet_a48 = getattr(cfg, "use_bitnet_a48", True)
         if self.use_bitnet_a48:
             self.a48_topk = getattr(cfg, "a48_attn_topk_sparsity", 0.5)
 
+        self.sd_prob = getattr(cfg, "stochastic_depth_prob", 0.0)
+
     def forward(self, x: torch.Tensor, prev_experts=None, past_kv=None):
         h = x
-
         if self.use_bitnet_a48:
             h = q_int4_v2(hadamard_transform(h))
 
-        if self.is_attn_block:
-            attn_out, new_kv, attn_z = self.attn(self.norm1(h), past_kv=past_kv)
-            if self.use_bitnet_a48:
-                attn_out = topk_sparsify(attn_out, self.a48_topk)
-            h = h + attn_out
+        # ── MHC (DeepSeek) или обычный остаточный путь ──
+        if self.use_mhc:
+            if self.is_attn_block:
+                def attn_fn(h_in, past_kv=past_kv):
+                    attn_out, new_kv, attn_z = self.attn(self.norm1(h_in), past_kv=past_kv)
+                    if self.use_bitnet_a48:
+                        attn_out = topk_sparsify(attn_out, self.a48_topk)
+                    h_mid = h_in + attn_out
+                    if self.cfg.use_moe:
+                        moe_out, aux_loss = self.moe(self.norm2(h_mid), prev_experts)
+                    else:
+                        moe_out = torch.zeros_like(h_mid)
+                        aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+                    h_mid = h_mid + moe_out
+                    return h_mid, new_kv, aux_loss + attn_z * getattr(self.cfg, "attn_z_loss_coef", 0.0001)
 
-            if self.cfg.use_moe:
-                moe_out, aux_loss = self.moe(self.norm2(h), prev_experts)
+                h, new_kv, total_aux = self.mhc(h, attn_fn, past_kv=past_kv)
             else:
-                moe_out = torch.zeros_like(h)
-                aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+                def mamba_fn(h_in):
+                    if hasattr(self, 'mamba'):
+                        mamba_out = self.mamba(self.norm1(h_in))
+                    else:
+                        mamba_out = torch.zeros_like(h_in)
+                    if self.use_bitnet_a48:
+                        mamba_out = topk_sparsify(mamba_out, self.a48_topk)
+                    return h_in + mamba_out
 
-            h = h + moe_out
-            total_aux = aux_loss + attn_z * getattr(self.cfg, "attn_z_loss_coef", 0.0001)
+                h = self.mhc(h, mamba_fn)
+                new_kv = None
+                total_aux = torch.tensor(0.0, device=x.device, dtype=x.dtype)
         else:
-            if hasattr(self, 'mamba'):
-                mamba_out = self.mamba(self.norm1(h))
-            else:
-                mamba_out = torch.zeros_like(h)
-            if self.use_bitnet_a48:
-                mamba_out = topk_sparsify(mamba_out, self.a48_topk)
-            h = h + mamba_out
-            total_aux = torch.tensor(0.0, device=x.device, dtype=x.dtype)
-            new_kv = None
+            # Обычный остаточный путь (без MHC)
+            if self.is_attn_block:
+                attn_out, new_kv, attn_z = self.attn(self.norm1(h), past_kv=past_kv)
+                if self.use_bitnet_a48:
+                    attn_out = topk_sparsify(attn_out, self.a48_topk)
+                h = h + attn_out
 
-        if self.mhc is not None:
-            h = self.mhc(h)
+                if self.cfg.use_moe:
+                    moe_out, aux_loss = self.moe(self.norm2(h), prev_experts)
+                else:
+                    moe_out = torch.zeros_like(h)
+                    aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+                h = h + moe_out
+                total_aux = aux_loss + attn_z * getattr(self.cfg, "attn_z_loss_coef", 0.0001)
+            else:
+                if hasattr(self, 'mamba'):
+                    mamba_out = self.mamba(self.norm1(h))
+                else:
+                    mamba_out = torch.zeros_like(h)
+                if self.use_bitnet_a48:
+                    mamba_out = topk_sparsify(mamba_out, self.a48_topk)
+                h = h + mamba_out
+                total_aux = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+                new_kv = None
+
+        # ── Stochastic Depth ──
+        if self.training and self.sd_prob > 0.0:
+            if torch.rand(1, device=x.device) < self.sd_prob:
+                h = x
 
         return h, total_aux, new_kv
