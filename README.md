@@ -1,12 +1,14 @@
 # Bulba 1 — Autonomous LLM Training Platform
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Parameters-67M-blue" alt="Parameters">
+  <img src="https://img.shields.io/badge/Parameters-27M-blue" alt="Parameters">
   <img src="https://img.shields.io/badge/VRAM-12GB-green" alt="VRAM">
   <img src="https://img.shields.io/badge/License-MIT-orange" alt="License">
 </p>
 
 Self-hosted LLM training platform for consumer GPUs. Hybrid architecture combining Mamba-3 SSM, Kimi Delta Attention (KDA), Mixture of Experts (MoE), and BitNet quantization. Now with **AutoPilot** for autonomous hyperparameter tuning.
+
+**~27M parameters** — equivalent to ~150-200M traditional transformer capacity with all optimizations.
 
 ## Table of Contents
 
@@ -353,7 +355,7 @@ bulba1-python/
 │   ├── tokenizer.py           # Custom tokenizer
 │   └── config.py              # Model config
 ├── configs/
-│   ├── default.yaml           # Main config (67M)
+│   ├── default.yaml           # Main config (27M)
 │   ├── auto.yaml              # AutoPilot config
 │   └── smoke_test.yaml        # Quick test
 ├── scripts/
