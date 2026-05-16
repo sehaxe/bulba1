@@ -1,0 +1,16 @@
+[Unit]
+Description=Bulba1 Pretokenizer Service
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/bulba1-python
+ExecStartPre=/bin/mkdir -p %h/bulba1-python/logs
+ExecStart=/usr/bin/uv run python scripts/pretokenize.py --phase all
+StandardOutput=append:%h/bulba1-python/logs/pretokenize.log
+StandardError=append:%h/bulba1-python/logs/pretokenize.log
+RemainAfterExit=yes
+
+[Install]
+; One-shot task – disable auto-start by default
+; WantedBy=default.target

@@ -1,39 +1,30 @@
+import math
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from bulba1.model.bit_linear import make_linear
-
 
 def _parallel_scan_affine(a, B):
     B_batch, T, H, D, _ = B.shape
     if T == 1:
         return B
 
-    # Create clean copies detached from computation graph
-    a_cum = a.detach().clone()
-    B_cum = B.detach().clone()
+    a_cum = a.clone()
+    B_cum = B.clone()
 
     step = 1
     while step < T:
-        # Calculate new values for the right half
-        left_size = T - step
-        a_left = a_cum[:, :left_size]
-        B_left = B_cum[:, :left_size]
-        
-        # Compute new values (non-inplace)
-        new_a = a_left * a_cum[:, step:]
-        new_B = new_a * B_left + B_cum[:, step:]
-        
-        # Create new tensors for the next iteration
-        a_new = torch.zeros_like(a_cum)
-        B_new = torch.zeros_like(B_cum)
-        a_new[:, :step] = a_cum[:, :step]
-        a_new[:, step:] = new_a
-        B_new[:, :step] = B_cum[:, :step]
-        B_new[:, step:] = new_B
-        
-        a_cum = a_new
-        B_cum = B_new
+        a_left = a_cum.roll(step, dims=1)
+        B_left = B_cum.roll(step, dims=1)
+
+        a_left[:, :step] = 1.0
+        B_left[:, :step] = 0.0
+
+        a_old = a_cum
+        B_old = B_cum
+
+        a_cum = a_left * a_old
+        B_cum = a_old * B_left + B_old
 
         step *= 2
 
@@ -105,9 +96,9 @@ class KimiDeltaAttention(nn.Module):
         for t in range(T):
             k_t = k[:, :, t, :].unsqueeze(-1)
             v_t = v[:, :, t, :].unsqueeze(-2)
-            f = gate_f[:, :, t].unsqueeze(-1).unsqueeze(-1)
+            f = gate_f[:, t].unsqueeze(-1).unsqueeze(-1)
             if gate_i is not None:
-                i = gate_i[:, :, t].unsqueeze(-1).unsqueeze(-1)
+                i = gate_i[:, t].unsqueeze(-1).unsqueeze(-1)
             else:
                 i = 1 - f
             S = f * S + i * (k_t @ v_t)
@@ -184,5 +175,3 @@ class KimiDeltaAttention(nn.Module):
 
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
         return self.o_proj(out), None, torch.tensor(0.0, device=x.device)
-
-

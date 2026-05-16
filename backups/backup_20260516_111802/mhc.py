@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 class MHC(nn.Module):
     """
@@ -39,6 +39,7 @@ class MHC(nn.Module):
     def forward(self, x, residual_fn, *args, past_kv=None, **kwargs):
         B, T, C = x.shape
         n = self.n
+        dtype = x.dtype
 
         # 1. Расширяем residual stream до n копий
         x_expanded = x.unsqueeze(2).expand(-1, -1, n, -1)   # (B,T,n,C)
@@ -66,9 +67,9 @@ class MHC(nn.Module):
         x_pre = (x_expanded * H_pre.unsqueeze(-1)).sum(dim=2)   # (B,T,C)
 
         # 7. Вызываем подслой
-        if past_kv is not None:
+        try:
             output = residual_fn(x_pre, past_kv=past_kv)
-        else:
+        except TypeError:
             output = residual_fn(x_pre)
         if isinstance(output, tuple):
             main_out = output[0]
@@ -103,5 +104,3 @@ class MHC(nn.Module):
         if extras:
             return (new_x,) + extras
         return new_x
-
-

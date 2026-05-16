@@ -1,12 +1,11 @@
 import torch
 import torch.nn as nn
-
-from bulba1.model.bit_linear import q_int4_v2, topk_sparsify
 from bulba1.model.diff_attn import DiffAttention, RMSNorm
-from bulba1.model.kda import KimiDeltaAttention
-from bulba1.model.mamba import MambaBlock
-from bulba1.model.mhc import MHC
 from bulba1.model.moe import MoELayer
+from bulba1.model.mamba import MambaBlock
+from bulba1.model.kda import KimiDeltaAttention
+from bulba1.model.mhc import MHC
+from bulba1.model.bit_linear import q_int4_v2, hadamard_transform, topk_sparsify
 
 
 class Block(nn.Module):
@@ -14,13 +13,12 @@ class Block(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.layer_idx = layer_idx
-        self.res_scale = nn.Parameter(torch.zeros(1))
 
         pattern = getattr(cfg, "alternating_pattern", None)
         if pattern is not None and layer_idx < len(pattern):
             self.is_attn_block = pattern[layer_idx] == "attn"
         else:
-            attn_every = getattr(cfg, "attn_every_n_layers", 4) or 4
+            attn_every = getattr(cfg, "attn_every_n_layers", 4)
             self.is_attn_block = (layer_idx % attn_every) == 0
 
         if self.is_attn_block:
@@ -41,20 +39,18 @@ class Block(nn.Module):
         if self.use_mhc:
             self.mhc = MHC(cfg)
 
-        self.use_bitnet_a48 = getattr(cfg, "use_bitnet_a48", False)
+        self.use_bitnet_a48 = getattr(cfg, "use_bitnet_a48", True)
         if self.use_bitnet_a48:
             self.a48_topk = getattr(cfg, "a48_attn_topk_sparsity", 0.5)
 
         self.sd_prob = getattr(cfg, "stochastic_depth_prob", 0.0)
 
     def forward(self, x: torch.Tensor, prev_experts=None, past_kv=None):
-        if self.training and self.sd_prob > 0.0 and torch.rand(1, device=x.device) < self.sd_prob:
-            return x, torch.tensor(0.0, device=x.device, dtype=x.dtype), None
-
         h = x
         if self.use_bitnet_a48:
-            h = q_int4_v2(self.norm1(h))
+            h = q_int4_v2(hadamard_transform(h))
 
+        # ── MHC (DeepSeek) или обычный остаточный путь ──
         if self.use_mhc:
             if self.is_attn_block:
                 def attn_fn(h_in, past_kv=past_kv):
@@ -111,7 +107,9 @@ class Block(nn.Module):
                 total_aux = torch.tensor(0.0, device=x.device, dtype=x.dtype)
                 new_kv = None
 
-        h = x + (h - x) * self.res_scale.tanh()
+        # ── Stochastic Depth ──
+        if self.training and self.sd_prob > 0.0:
+            if torch.rand(1, device=x.device) < self.sd_prob:
+                h = x
+
         return h, total_aux, new_kv
-
-

@@ -1,0 +1,221 @@
+# configs/default.yaml — МОДЕЛЬ 340M (d_model=768, n_layers=16)
+#
+# Вместо 580M, чтобы избежать OOM при batch_size=28.
+# Все остальные улучшения сохранены: MHC n=4, iter=10, Muon ns_steps=1,
+# bitlinear_mtp=true, LR cooldown, seq_len=512, compile_model=true.
+
+model:
+  # ── Core architecture ──
+  d_model: 768
+  n_layers: 16
+  n_heads: 12
+  vocab_size: 26000
+
+  # ── MoE ──
+  num_experts: 16
+  top_k: 2
+  expert_hidden: 768
+  use_moe: true
+  use_rex: true
+  rex_reuse_weight: 0.3
+  num_shared_experts: 2
+
+  # ── KDA enhancements ──
+  kda_use_rope: true
+  kda_double_gate: true
+  use_expert_choice: false
+  expert_choice_capacity: 0
+
+  # ── Attention (DiffAttention) ──
+  use_diff_attn: true
+  use_mla: true
+  mla_latent_dim: 64
+  use_qk_norm: true
+  use_per_head_gating: true
+  use_value_residuals: true
+  rope_theta: 10000.0
+  max_ctx_len: 4096
+  use_sliding_window: false
+  sliding_window_size: 512
+  lambda_init: 0.8
+
+  # ── Mamba ──
+  use_mamba: true
+  mamba_d_state: 128
+  mamba_d_conv: 4
+  mamba_expand: 2
+  alternating_pattern: null
+  attn_every_n_layers: 4
+  use_kda: true
+  kda_use_parallel_scan: true
+  kda_gate_dim: 16
+
+  # ── MHC (DeepSeek) ──
+  use_mhc: true
+  mhc_n: 4
+  mhc_iterations: 10
+
+  # ── CLR / MTP / Skip-gram ──
+  num_clr_tokens: 4
+  use_mtp: true
+  mtp1_warmup_steps: 1500
+  mtp2_warmup_steps: 3000
+  num_mtp_heads: 2
+  use_skip_gram: true
+  skip_gram_range: 3
+  skip_gram_weight: 0.05
+
+  # ── Initialization ──
+  init_std: 0.02
+  depth_scaled_init: true
+
+  # ── Loss coefficients ──
+  router_z_loss_coef: 0.001
+  router_entropy_coef: 0.001
+  attn_z_loss_coef: 0.0001
+  loss_mtp1_weight: 0.3
+  loss_mtp2_weight: 0.1
+  label_smoothing: 0.05
+
+  # ── Quantization ──
+  use_bitlinear: true
+  bitnet_activation_bits: 8
+  use_f16: true
+  use_grouped_gemm: false
+  bitlinear_lm_head: false
+  bitlinear_mtp: true
+  bitnet_init_std: 0.001
+  use_quantized_kv_cache: true
+  kv_cache_bits: 3
+  use_fp4: false
+  use_bitnet_a48: false          # отключён для стабильности
+  a48_attn_topk_sparsity: 0.5
+  a48_use_relu2_glu: true
+  a48_two_stage_training: false
+  a48_stage1_steps_ratio: 0.95
+  a48_stage1_bits: 8
+  a48_stage2_bits: 4
+
+  # ── Optimizer ──
+  use_muon: true
+  muon_nesterov: true
+  muon_ns_steps: 1
+  muon_min_dim: 256
+  muon_momentum: 0.95
+  learning_rate: 1.5e-3
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-8
+  max_grad_norm: 1.0
+  ema_decay: 0.999
+  ema_vram_threshold: 0.45
+
+  # ── VRAM / OOM safety ──
+  vram_warn_pct: 88.0
+  vram_critical_pct: 95.0
+  max_batch_reductions: 3
+  min_batch_size: 1
+  vram_safety_factor: 0.75
+  vram_overhead_mb: 3072.0
+  vram_overhead_factor: 1.35
+
+  # ── Compile ──
+  compile_model: true
+
+training:
+  # ── Schedule ──
+  seq_len: 512
+  batch_size: 34
+  grad_accum_steps: 1
+  total_steps: 100000
+  warmup_ratio: 0.0
+  use_lr_cooldown: true
+  lr_cooldown_ratio: 0.05
+  skip_preflight: true
+
+  # ── Curriculum ──
+  curriculum_warmup_ratio: 0.1
+  curriculum_start_seq_len: 64
+  curriculum_seq_lens: [128, 256, 512, 1024]
+  curriculum_seq_len_boundaries: [0.15, 0.35, 0.60]
+
+  # ── Stage / LR multipliers (отключены) ──
+  stage_boundaries: [1.0, 1.0, 1.0, 1.0]
+  stage_lr_multipliers: [1.0, 1.0, 1.0, 1.0]
+
+  # ── Checkpointing ──
+  checkpoint_every: 1000
+  checkpoint_keep_top_k: 3
+  checkpoint_dir: "checkpoints/run_bulba1_340m"
+  checkpoint_every_n_layers: 1
+
+  # ── Logging ──
+  log_every: 50
+  early_log_steps: 100         # первые 100 шагов
+  early_log_every: 10           # логировать каждые 10 шагов
+  eval_every: 0
+  eval_max_batches: 10
+
+  # ── Regularization ──
+  dropout: 0.0
+  label_smoothing: 0.05
+  gradient_noise: 1.0e-5
+  stochastic_depth_prob: 0.05
+
+  # ── Data ──
+  data_dir: "data/tokenized"
+  raw_dir: "data/raw"
+  filtered_dir: "data/filtered"
+  train_dir: "data/train"
+  log_dir: "logs"
+  num_workers: 10
+  prefetch_factor: 6
+  data_max_docs: 1000000
+  data_max_items_per_source: null
+
+  # ── Precision ──
+  use_f16: true
+  use_gradient_checkpointing: true
+
+  # ── Generation ──
+  generate_max_new_tokens: 30
+  generate_top_k: 50
+  generate_temperature: 0.8
+
+  # ── Chunked CE ──
+  chunk_size: 8192
+  auto_chunked_ce_threshold: 50000
+  ignore_index: -100
+
+  # ── Tokenizer ──
+  tokenizer_sample_size: 10000000
+  tokenizer_vocab_candidates: [8000, 12000, 16000, 24000, 32000, 48000, 64000]
+  bos_id: 1
+  eos_id: 2
+  pad_id: 0
+
+  # ── Chinchilla / scaling ──
+  max_model_params: null
+  tokens_per_param_target: 20.0
+  overtraining_mode: false
+  overtraining_ratio: 100.0
+
+  # ── Data curation ──
+  data_filter_remove_templated: true
+  data_filter_min_doc_length: 100
+  data_filter_max_doc_length: 500000
+  data_filter_remove_auto_generated: true
+  data_enforce_domain_balance: true
+  data_domain_weights:
+    code: 0.30
+    arxiv: 0.20
+    wiki: 0.15
+    books: 0.15
+    web: 0.10
+    math: 0.10
+
+  # ── Long context ──
+  long_context_assembly: true
+  long_context_min_length: 4096
+  long_context_max_length: 16384

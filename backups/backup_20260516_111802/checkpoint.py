@@ -1,9 +1,8 @@
-import json
 import os
-
+import json
 import torch
 import torch.nn as nn
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file, load_file
 
 
 class CheckpointManager:
@@ -20,7 +19,7 @@ class CheckpointManager:
         }
 
     def save(
-        self, model: nn.Module, optimizer, step: int, loss: float, config: dict | None = None, ema=None
+        self, model: nn.Module, optimizer, step: int, loss: float, config: dict = None, ema=None
     ):
         path = os.path.join(self.checkpoint_dir, f"checkpoint_step_{step}.safetensors")
         state_dict = model.state_dict()
@@ -39,16 +38,16 @@ class CheckpointManager:
             json.dump(metadata, f)
 
         self.checkpoints.append((step, loss, path))
+        self.checkpoints.sort(key=lambda x: x[1])
 
         best_path = os.path.join(self.checkpoint_dir, "best.safetensors")
-        if loss <= (self.checkpoints[0][1] if self.checkpoints else float("inf")):
+        if step == self.checkpoints[0][0]:
             save_file(state_dict, best_path)
             best_extras = self._extra_paths(best_path)
             torch.save(optimizer.state_dict(), best_extras["opt"])
             if ema is not None:
                 torch.save(ema.state_dict(), best_extras["ema"])
 
-        self.checkpoints.sort(key=lambda x: x[0], reverse=True)
         while len(self.checkpoints) > self.keep_top_k:
             old = self.checkpoints.pop()
             for suffix in [".safetensors", ".json", "_optimizer.pt", "_ema.pt"]:
@@ -56,7 +55,7 @@ class CheckpointManager:
                 if os.path.exists(f):
                     os.remove(f)
 
-        return loss <= min(x[1] for x in self.checkpoints)
+        return step == self.checkpoints[0][0]
 
     def find_latest(self) -> str:
         import glob
@@ -95,5 +94,3 @@ class CheckpointManager:
                 meta = json.load(f)
             step = meta.get("step", 0)
         return step
-
-

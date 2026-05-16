@@ -1,5 +1,4 @@
 import math
-
 import torch
 from torch.optim import Optimizer
 
@@ -10,14 +9,14 @@ class MuonOptimizer(Optimizer):
     def __init__(
         self, params, lr=3e-4, weight_decay=0.1, momentum=0.95, nesterov=True, ns_steps=5, min_dim=2
     ):
-        defaults = {
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "momentum": momentum,
-            "nesterov": nesterov,
-            "ns_steps": ns_steps,
-            "min_dim": min_dim,
-        }
+        defaults = dict(
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_steps=ns_steps,
+            min_dim=min_dim,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -165,5 +164,3 @@ class CombinedOptimizer:
         if self.adamw is not None:
             groups.extend(self.adamw.param_groups)
         return groups
-
-

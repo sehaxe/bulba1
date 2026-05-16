@@ -1,5 +1,4 @@
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -54,7 +53,7 @@ def q_int4_ste(x: torch.Tensor) -> torch.Tensor:
     scale = beta / 7.0
     x_norm = x / scale
     x_quant = torch.round(torch.clamp(x_norm, -8, 7))
-    return ((x_quant - x_norm).detach() + x_norm) * scale
+    return (x_quant - x_norm).detach() + x_norm * scale
 
 
 def q_fp4_ste(x: torch.Tensor, M: int = 2, E: int = 2) -> torch.Tensor:
@@ -90,24 +89,25 @@ def quantize_ste_absmax(x: torch.Tensor, num_bits: int = 8) -> torch.Tensor:
 
 
 def hadamard_transform(x):
+    """Fast Walsh-Hadamard Transform (FWHT) по последнему измерению."""
     *batch_dims, D = x.shape
     x = x.reshape(-1, D)
-    pad_m = 1
-    while pad_m < D:
-        pad_m <<= 1
-    if pad_m != D:
-        x = F.pad(x, (0, pad_m - D))
-    N = x.size(0)
-    x = x[:, None, :]
-    block = 1
-    while block < pad_m:
-        x = x.view(N, -1, 2, block)
-        u = x[:, :, 0]
-        v = x[:, :, 1]
-        x = torch.stack([u + v, u - v], dim=2)
-        block <<= 1
-    x = x.view(N, pad_m)
-    return (x[:, :D] / math.sqrt(pad_m)).reshape(*batch_dims, D)
+    N = D
+    m = 1
+    while m < N:
+        m <<= 1
+    if m != N:
+        x = F.pad(x, (0, m - N))
+    step = 1
+    while step < m:
+        for i in range(0, m, step * 2):
+            u = x[:, i:i+step]
+            v = x[:, i+step:i+2*step]
+            x[:, i:i+step] = u + v
+            x[:, i+step:i+2*step] = u - v
+        step <<= 1
+    x = x[:, :N].reshape(*batch_dims, D)
+    return x / (m ** 0.5)
 
 
 def q_int4_v2(x):
@@ -157,7 +157,8 @@ class BitLinear(nn.Module):
             nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w = ste_b158(self.weight).to(x.dtype)
+        w = ste_b158(self.weight).to(x.dtype)  # Match input dtype
+        w = w.to(x.dtype)   # ← критично для autocast BF16
         if self.quantize_input:
             x = activation_quant_ste(x, self.activation_bits)
         return F.linear(x, w, self.bias)
@@ -185,9 +186,6 @@ class QuantizedKVCache:
         )
 
     def dequantize(self) -> tuple:
-        if self.k_quant is None or self.k_scale is None:
-            return None, None
-        assert self.v_quant is not None and self.v_scale is not None
         k = self.k_quant.float() * self.k_scale
         v = self.v_quant.float() * self.v_scale
         return k, v
@@ -205,5 +203,3 @@ class QuantizedKVCache:
         if self.k_quant is None:
             return None, None
         return self.dequantize()
-
-

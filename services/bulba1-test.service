@@ -1,0 +1,16 @@
+[Unit]
+Description=Bulba1 Training Test (E2E verification)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/bulba1-python
+ExecStartPre=/bin/mkdir -p %h/bulba1-python/logs
+ExecStart=/usr/bin/uv run python -m bulba1.cli --config configs/e2e_test.yaml
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:%h/bulba1-python/logs/bulba1-test.log
+StandardError=append:%h/bulba1-python/logs/bulba1-test.log
+Restart=no
+
+[Install]
+WantedBy=default.target

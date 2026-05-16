@@ -3,7 +3,7 @@ SHELL := /bin/bash
 
 UV := uv
 
-.PHONY: help install sync data build train test clean install-services profile-mamba profile-kda profile-moe
+.PHONY: help install sync data build train test clean install-services
 
 help:
 	@echo "Доступные команды:"
@@ -15,9 +15,7 @@ help:
 	@echo "  test           - запустить тесты"
 	@echo "  clean          - удалить чекпоинты и логи"
 	@echo "  install-services - установить systemd сервисы"
-	@echo "  profile-mamba  - профилировать Mamba-3 блок"
-	@echo "  profile-kda    - профилировать KDA блок"
-	@echo "  profile-moe    - профилировать MoE блок"
+	@echo "  profile        - профилировать модель (tools/deep_profile.py)"
 
 install:
 	$(UV) sync --extra cuda --extra dev
@@ -49,11 +47,5 @@ install-services:
 	@echo "  systemctl --user start bulba1       # запустить тренировку"
 	@echo "  systemctl --user start bulba1-bot   # запустить бота"
 
-profile-mamba:
-	$(UV) run python experiments/profile_mamba.py --config configs/default.yaml
-
-profile-kda:
-	$(UV) run python experiments/profile_kda.py --config configs/default.yaml
-
-profile-moe:
-	$(UV) run python experiments/profile_moe.py --config configs/default.yaml
+profile:
+	$(UV) run python tools/deep_profile.py

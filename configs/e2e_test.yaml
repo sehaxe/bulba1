@@ -1,18 +1,18 @@
 model:
   # ── Core architecture ──
-  d_model: 512
-  n_layers: 10
-  n_heads: 8
+  d_model: 832
+  n_layers: 17
+  n_heads: 13
   vocab_size: 26000
 
   # ── MoE ──
-  num_experts: 4
+  num_experts: 16
   top_k: 2
-  expert_hidden: 512
+  expert_hidden: 832
   use_moe: true
   use_rex: true
-  rex_reuse_weight: 0.1
-  num_shared_experts: 3
+  rex_reuse_weight: 0.3
+  num_shared_experts: 2
 
   # ── KDA enhancements ──
   kda_use_rope: true
@@ -23,7 +23,7 @@ model:
   # ── Attention (DiffAttention) ──
   use_diff_attn: true
   use_mla: true
-  mla_latent_dim: 32
+  mla_latent_dim: 64
   use_qk_norm: true
   use_per_head_gating: true
   use_value_residuals: true
@@ -45,15 +45,7 @@ model:
   # ── MHC (DeepSeek) ──
   use_mhc: true
   mhc_n: 4
-  mhc_iterations: 4
-
-  # ── Efficiency techniques ──
-  num_unique_blocks: 4
-  recurrent_repeats: 3
-  merge_every_n_layers: 2
-  inference_merge_ratio: 0.3
-  use_mixture_of_depths: true
-  mod_capacity: 0.75
+  mhc_iterations: 6
 
   # ── CLR / MTP / Skip-gram ──
   num_clr_tokens: 4
@@ -88,7 +80,7 @@ model:
   use_quantized_kv_cache: true
   kv_cache_bits: 3
   use_fp4: false
-  use_bitnet_a48: true
+  use_bitnet_a48: false
   a48_attn_topk_sparsity: 0.5
   a48_use_relu2_glu: true
   a48_two_stage_training: false
@@ -99,13 +91,10 @@ model:
   # ── Optimizer ──
   use_muon: true
   muon_nesterov: true
-  muon_ns_steps: 3
+  muon_ns_steps: 1
   muon_min_dim: 256
   muon_momentum: 0.95
-  learning_rate: 0.0005
-  tied_embeddings: true
-  use_mup_init: true
-  use_inv_sqrt_lr: true
+  learning_rate: 1.5e-3
   weight_decay: 0.1
   beta1: 0.9
   beta2: 0.95
@@ -117,7 +106,7 @@ model:
   # ── VRAM / OOM safety ──
   vram_warn_pct: 88.0
   vram_critical_pct: 95.0
-  max_batch_reductions: 6
+  max_batch_reductions: 3
   min_batch_size: 1
   vram_safety_factor: 0.75
   vram_overhead_mb: 3072.0
@@ -126,71 +115,58 @@ model:
 training:
   # ── Schedule ──
   seq_len: 512
-  batch_size: 32
-  skip_preflight: true
-  grad_accum_steps: 2
-  total_steps: 38035
-  warmup_ratio: 0.05
-  epochs: 3
-  use_lr_cooldown: false
+  batch_size: 30
+  grad_accum_steps: 1
+  total_steps: 2
+  warmup_ratio: 0.01
+  use_lr_cooldown: true
   lr_cooldown_ratio: 0.05
   use_mtp_cooldown: true
   mtp_cooldown_ratio: 0.15
   mtp_end_scale: 0.1
 
   # Быстрый curriculum: 1000 шагов разгона с 64 до 512 токенов
-  curriculum_warmup_ratio: 0.15
-  curriculum_start_seq_len: 128
+  curriculum_warmup_ratio: 0.01
+  curriculum_start_seq_len: 64
 
   # ── Checkpointing ──
-  checkpoint_every: 1000
+  checkpoint_every: 1
   checkpoint_keep_top_k: 3
-  checkpoint_dir: "checkpoints/run_bulba1_67m"
-  log_every: 50
-  eval_every: 500
+  checkpoint_dir: "checkpoints/e2e_test"
+  checkpoint_every_n_layers: 4
+
+  # ── Logging ──
+  log_every: 1
+  eval_every: 0
   eval_max_batches: 10
-  gen_every: 2000
 
   # ── Regularization ──
   dropout: 0.05
   label_smoothing: 0.05
   gradient_noise: 3.0e-5
   stochastic_depth_prob: 0.1
-  token_dropout: 0.05
 
   # ── Data ──
   data_dir: "data/tokenized"
-  val_data_dir: "data/tokenized"
-  log_dir: "logs"
-  num_workers: 0
-  prefetch_factor: 4
+  log_dir: "logs/e2e_test"
+  num_workers: 4
+  prefetch_factor: 2
 
   # ── Precision ──
   use_f16: true
   use_gradient_checkpointing: true
-  compile: false
+
+  # ── Generation ──
+  generate_max_new_tokens: 30
+  generate_top_k: 50
+  generate_temperature: 0.8
 
   # ── Chunked CE ──
   chunk_size: 8192
-  auto_chunked_ce_threshold: 0
+  auto_chunked_ce_threshold: 50000
   ignore_index: -100
 
   # ── Tokenizer IDs ──
   bos_id: 1
   eos_id: 2
   pad_id: 0
-
-  # ── Auto Training Pipeline ──
-  # After main training completes, automatically run SFT and/or DPO
-  auto_sft: true
-  auto_sft_data: "data/sft"
-  auto_sft_epochs: 3
-  auto_sft_lr: 1.0e-5
-
-  auto_dpo: true
-  auto_dpo_data: "data/dpo"
-  auto_dpo_epochs: 3
-  auto_dpo_lr: 1.0e-6
-  auto_dpo_beta: 0.1
-
-

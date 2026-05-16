@@ -1,8 +1,9 @@
+import os
 import time
-from dataclasses import dataclass
-
 import psutil
 import torch
+from typing import Dict, Optional
+from dataclasses import dataclass
 
 
 @dataclass
@@ -16,8 +17,8 @@ class SystemSnapshot:
     vram_total_mb: float
     vram_pct: float
     cpu_pct: float
-    gpu_util_pct: float | None = None
-    gpu_temp_c: float | None = None
+    gpu_util_pct: Optional[float] = None
+    gpu_temp_c: Optional[float] = None
 
 
 class SystemMonitor:
@@ -112,7 +113,7 @@ class SystemMonitor:
             self._history = self._history[-100:]
         return snap
 
-    def format_status(self, snap: SystemSnapshot | None = None) -> str:
+    def format_status(self, snap: Optional[SystemSnapshot] = None) -> str:
         if snap is None:
             snap = self.snapshot()
         parts = [
@@ -129,7 +130,7 @@ class SystemMonitor:
         parts.append(f"CPU {snap.cpu_pct:.0f}%")
         return " | ".join(parts)
 
-    def check_critical(self, cfg) -> dict[str, bool]:
+    def check_critical(self, cfg) -> Dict[str, bool]:
         snap = self.snapshot()
         return {
             "ram_critical": snap.ram_pct > 95,
@@ -173,20 +174,8 @@ def preflight_memory_test(model, cfg, device, max_attempts: int = 3) -> dict:
             if getattr(cfg, "use_f16", True)
             else torch.no_grad()
         )
-
-        use_ckpt = getattr(cfg, "use_gradient_checkpointing", False)
-        if use_ckpt and hasattr(torch.utils.checkpoint, "checkpoint"):
-            from torch.utils.checkpoint import checkpoint as ckpt
-
-            def _run_forward(x):
-                return model(x)
-
-            with amp_ctx:
-                out = ckpt(_run_forward, dummy_input, use_reentrant=False)
-                logits, mtp1, mtp2, aux_loss = out
-        else:
-            with amp_ctx:
-                logits, mtp1, mtp2, aux_loss = model(dummy_input)
+        with amp_ctx:
+            logits, mtp1, mtp2, aux_loss = model(dummy_input, cfg.checkpoint_every_n_layers)
 
         loss = logits.mean()
         loss.backward()
@@ -200,7 +189,7 @@ def preflight_memory_test(model, cfg, device, max_attempts: int = 3) -> dict:
             return peak_vram - base_vram
         return 0.0
 
-    model.train()
+    model.eval()
     batch_size = cfg.batch_size
     grad_accum = getattr(cfg, "grad_accum_steps", max(1, cfg.batch_size))
     seq_len = cfg.seq_len
@@ -220,43 +209,25 @@ def preflight_memory_test(model, cfg, device, max_attempts: int = 3) -> dict:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
             old_bs = batch_size
-            batch_size = max(1, batch_size - 2)
-            grad_accum = max(1, grad_accum + 1)
+            batch_size = max(1, batch_size // 2)
+            grad_accum = max(1, grad_accum * 2)
             if batch_size == old_bs:
-                old_seq = seq_len
-                seq_len = max(1, seq_len // 2)
-                if seq_len == old_seq:
-                    model.train()
-                    return {
-                        "success": False,
-                        "measured_vram_mb": 0.0,
-                        "batch_size": batch_size,
-                        "grad_accum": grad_accum,
-                        "attempts": attempt + 1,
-                        "error": f"OOM at batch_size={old_bs}, seq_len={old_seq}, cannot reduce further",
-                    }
+                model.train()
+                return {
+                    "success": False,
+                    "measured_vram_mb": 0.0,
+                    "batch_size": batch_size,
+                    "grad_accum": grad_accum,
+                    "attempts": attempt + 1,
+                    "error": f"OOM at batch_size={old_bs}, cannot reduce further",
+                }
 
-    try:
-        measured_vram = _test_once(batch_size, seq_len)
-        model.train()
-        return {
-            "success": True,
-            "measured_vram_mb": measured_vram,
-            "batch_size": batch_size,
-            "grad_accum": grad_accum,
-            "attempts": max_attempts + 1,
-        }
-    except torch.cuda.OutOfMemoryError:
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        model.train()
-        return {
-            "success": False,
-            "measured_vram_mb": 0.0,
-            "batch_size": batch_size,
-            "grad_accum": grad_accum,
-            "attempts": max_attempts + 1,
-            "error": f"OOM after {max_attempts} attempts, final batch_size={batch_size}, seq_len={seq_len}",
-        }
-
-
+    model.train()
+    return {
+        "success": False,
+        "measured_vram_mb": 0.0,
+        "batch_size": batch_size,
+        "grad_accum": grad_accum,
+        "attempts": max_attempts,
+        "error": f"OOM after {max_attempts} attempts, final batch_size={batch_size}",
+    }

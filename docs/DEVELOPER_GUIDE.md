@@ -4,51 +4,55 @@
 
 ```
 bulba1-python/
+├── bulba1/                    # Main package
+│   ├── model/                 # Model architecture
+│   │   ├── minichat.py        # Main model (MiniChat, TiedHead)
+│   │   ├── block.py           # Layer block (Block)
+│   │   ├── kda.py             # Kimi Delta Attention
+│   │   ├── diff_attn.py       # Differential Attention
+│   │   ├── mamba.py           # Mamba-3 SSM
+│   │   ├── moe.py             # Mixture of Experts + ReX
+│   │   ├── mhc.py             # Multi-Head Latent Clustering
+│   │   ├── bit_linear.py      # BitNet quantization
+│   │   ├── token_merging.py   # Token merging (new)
+│   │   └── mod.py             # MoDGate (new)
+│   │
+│   ├── training/               # Training pipeline
+│   │   ├── engine.py          # Main training loop + AutoPilot
+│   │   ├── optimizer.py       # Muon + AdamW
+│   │   ├── checkpoint.py      # Checkpoint management
+│   │   ├── ema.py             # Exponential moving average
+│   │   ├── stages.py          # Multi-stage training
+│   │   ├── eval.py            # Evaluation
+│   │   ├── monitor.py         # System monitoring
+│   │   └── chunked_ce.py      # Memory-efficient CE
+│   │
+│   ├── autonomy.py            # AutoPilot (new v2 feature)
+│   ├── config.py             # ModelConfig
+│   ├── tokenizer.py          # Custom tokenizer
+│   ├── orchestrator.py       # End-to-end pipeline
+│   └── cli.py                # CLI interface (with --auto)
+│
 ├── configs/
-│   └── default.yaml        # Training configuration
-├── bulba1/
-│   ├── cli.py               # CLI interface
-│   ├── config.py            # ModelConfig dataclass
-│   ├── model/
-│   │   ├── minichat.py      # Main model
-│   │   ├── block.py         # Transformer block
-│   │   ├── diff_attn.py     # Differential attention
-│   │   ├── moe.py           # MoE + ReX
-│   │   ├── mamba.py         # Mamba-2 SSD
-│   │   ├── bit_linear.py    # BitNet quantization
-│   │   ├── kda.py           # Kimi Delta Attention
-│   │   └── mhc.py           # Multi-head Latent Clustering
-│   ├── training/
-│   │   ├── engine.py        # Training loop
-│   │   ├── optimizer.py      # Muon + AdamW
-│   │   ├── checkpoint.py     # Save/load
-│   │   └── ema.py            # Exponential moving average
-│   └── tokenizer.py          # Tokenizer
+│   └── default.yaml           # Main config (smaller model: 512d, 10 layers)
 │
-├── telegram_bot/
-│   └── bot.py               # Telegram monitoring bot
-│
-├── tools/
-│   ├── deep_profile.py      # GPU profiling
-│   └── memory_test.py        # Memory testing
-│
-└── docs/
-    ├── ARCHITECTURE.md        # Model architecture
-    └── DEVELOPER_GUIDE.md    # This file
+├── tools/                     # Profiling & visualization
+├── scripts/                   # Data scripts
+├── docs/                     # Documentation
+└── tests/                    # Test suite
 ```
 
 ## Development Setup
 
 ```bash
-# Clone and setup
-git clone https://github.com/your-repo/bulba1-python.git
-cd bulba1-python
-
 # Install dependencies
-uv sync
+uv sync --extra cuda --extra dev
 
 # Verify
-python bulba.py --help
+python -c "from bulba1 import MiniChat; print('OK')"
+
+# Run CLI
+python -m bulba1.cli --help
 ```
 
 ## Running Tests
@@ -57,155 +61,162 @@ python bulba.py --help
 # Run all tests
 pytest
 
-# Run specific test
-pytest tests/test_model.py
+# Run specific test file
+pytest tests/test_model.py -v
 
-# With coverage
-pytest --cov=bulba1
+# Run with coverage
+pytest --cov=bulba1 --cov-report=html
+```
+
+## New Features (v2 from Dump)
+
+### 1. AutoPilot (Autonomous Training)
+
+Enable with `--auto` flag:
+
+```bash
+python -m bulba1.cli --config configs/default.yaml --auto
+```
+
+In code:
+
+```python
+from bulba1.training.engine import TrainingEngine
+
+# With AutoPilot
+engine = TrainingEngine(model, cfg, tokenizer, auto_mode=True)
+
+# Without AutoPilot (default)
+engine = TrainingEngine(model, cfg, tokenizer, auto_mode=False)
+```
+
+AutoPilot adjusts:
+- Learning rate dynamically
+- Detects plateaus
+- Triggers warm restarts
+
+### 2. Token Merging
+
+Enable in config:
+
+```yaml
+model:
+  inference_merge_ratio: 0.3  # 30% token merging at inference
+  merge_every_n_layers: 2     # Merge every 2 layers
+```
+
+### 3. Mixture of Depths (MoD)
+
+Enable in config:
+
+```yaml
+model:
+  use_mixture_of_depths: true
+  mod_capacity: 0.75  # Keep 75% of tokens
+```
+
+### 4. Recurrent Blocks
+
+```yaml
+model:
+  num_unique_blocks: 10  # Unique blocks
+  recurrent_repeats: 2  # Repeat twice = 20 effective layers
+```
+
+### 5. Tied Embeddings
+
+```yaml
+model:
+  tied_embeddings: true  # Default, saves memory
 ```
 
 ## Adding New Features
 
 ### 1. New Model Component
 
-Создай файл в `bulba1/model/`:
-
 ```python
-# bulba1/model/my_module.py
+# model/my_module.py
 import torch.nn as nn
 
 class MyModule(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        # ...
+        self.linear = nn.Linear(cfg.d_model, cfg.d_model)
 
     def forward(self, x):
-        # ...
-        return output
+        return self.linear(x)
 ```
 
-Добавь в `Block` в `block.py`:
+### 2. Enable AutoPilot
 
-```python
-from bulba1.model.my_module import MyModule
+The AutoPilot is already integrated in engine.py. Just use `--auto` flag:
 
-class Block(nn.Module):
-    def __init__(self, cfg, layer_idx):
-        # ...
-        self.my_module = MyModule(cfg)
-```
-
-### 2. New Training Feature
-
-Добавь в `TrainingEngine` в `training/engine.py`:
-
-```python
-def train_step(self, batch):
-    # ... existing code
-    
-    # New feature
-    if self.cfg.my_new_feature:
-        do_something()
-```
-
-### 3. New CLI Option
-
-Добавь в `bulba1/cli.py`:
-
-```parser.add_argument("--my-flag", action="store_true", help="My new feature")```
-
-И в `main()`:
-
-```python
-if args.my_flag:
-    cfg.my_new_feature = True
-```
-
-## Code Style
-
-```python
-# Use type hints
-def forward(self, x: torch.Tensor) -> torch.Tensor:
-    ...
-
-# Docstrings for public API
-def train(self, loader):
-    """Train model for one epoch.
-    
-    Args:
-        loader: DataLoader with training batches
-        
-    Returns:
-        Average loss for the epoch
-    """
-    ...
-
-# Use dataclasses for config
-@dataclass
-class ModelConfig:
-    d_model: int = 768
-    n_layers: int = 16
-    ...
-```
-
-## Testing New Components
-
-```python
-# tests/test_my_module.py
-import pytest
-import torch
-from bulba1.utils.config import ModelConfig
-from bulba1.model.my_module import MyModule
-
-def test_forward():
-    cfg = ModelConfig(d_model=768)
-    module = MyModule(cfg)
-    x = torch.randn(2, 10, 768)
-    out = module(x)
-    assert out.shape == x.shape
+```bash
+python -m bulba1.cli --config configs/default.yaml --auto
 ```
 
 ## Debugging
 
+### Print Model Structure
+
 ```python
-# Enable torch debug mode
-torch.autograd.set_detect_anomaly(True)
+# List all layers
+for name, module in model.named_modules():
+    print(name)
 
-# Print gradients
-for name, param in model.named_parameters():
-    if param.grad is not None:
-        print(f"{name}: {param.grad.norm()}")
+# Count parameters
+total = sum(p.numel() for p in model.parameters())
+print(f"Total params: {total/1e6:.1f}M")
+```
 
-# Profile forward pass
-with torch.profiler.profile(...) as prof:
-    output = model(input_ids)
+### Debug VRAM
+
+```python
+import torch
+print(f"Allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+print(f"Reserved: {torch.cuda.memory_reserved()/1e9:.2f} GB")
+```
+
+### Debug AutoPilot
+
+```python
+# Check if AutoPilot is active
+print(f"Auto mode: {engine.auto_mode}")
+print(f"Autopilot: {engine.autopilot}")
+
+# Get current state
+if engine.autopilot:
+    print(f"Mode: {engine.autopilot.state.mode}")
+    print(f"LR: {engine.autopilot.current_lr}")
 ```
 
 ## Common Issues
 
-### OOM (Out of Memory)
+### OOM
 
 ```python
-# Solution 1: Reduce batch
-cfg.batch_size = 3
+# Solution 1: Reduce model size
+d_model: 512  # from 768
+n_layers: 10  # from 16
 
-# Solution 2: Gradient checkpointing
-cfg.use_gradient_checkpointing = True
+# Solution 2: Reduce batch
+batch_size: 16
 
-# Solution 3: Disable features
-cfg.use_mamba = False
-cfg.use_bitlinear = False
+# Solution 3: Enable gradient checkpointing
+use_gradient_checkpointing: true
+
+# Solution 4: Disable features
+use_mamba: false
+use_bitlinear: false
+use_moe: false
 ```
 
-### Slow Training
+### Training Instability
 
 ```python
-# Enable torch.compile
-python bulba.py --compile
-
-# Reduce sequence length
-python bulba.py --seq-len 256
+# Use AutoPilot for automatic adjustment
+python -m bulba1.cli --config configs/default.yaml --auto
 ```
 
 ### Checkpoint Issues
@@ -214,29 +225,10 @@ python bulba.py --seq-len 256
 # Verify checkpoint
 import torch
 ckpt = torch.load("checkpoints/.../model.pt", map_location="cpu")
-print(ckpt.keys())
+print(f"Step: {ckpt.get('step', 'N/A')}")
 
-# Resume from checkpoint
-python bulba.py --resume --checkpoint-dir checkpoints/...
-```
-
-## Performance Profiling
-
-```bash
-# GPU utilization
-watch -n 1 nvidia-smi
-
-# PyTorch profiler
-python -c "
-import torch
-from bulba1 import MiniChat
-with torch.profiler.profile(
-    activities=[torch.profiler.ProfilerActivity.CPU, 
-                torch.profiler.ProfilerActivity.CUDA]
-) as prof:
-    model(input_ids)
-print(prof.key_averages().table())
-"
+# Resume with AutoPilot state
+python -m bulba1.cli --resume --checkpoint-dir checkpoints/... --auto
 ```
 
 ## Git Workflow
@@ -254,22 +246,31 @@ git commit -m "Add my feature"
 
 # Push
 git push origin feature/my-feature
-
-# Create PR
-gh pr create
 ```
 
 ## Code Review Checklist
 
 - [ ] Type hints on public functions
 - [ ] Docstrings on new features
-- [ ] No `as any` or `@ts-ignore`
 - [ ] Tests pass
 - [ ] VRAM usage acceptable (<14GB)
-- [ ] Works on CPU fallback
+- [ ] Works with CUDA
+- [ ] Config options have defaults
+- [ ] Works with and without --auto
+
+## Performance Tuning
+
+| Optimization | Command/Config | Impact |
+|--------------|----------------|--------|
+| torch.compile | `--compile` | ~20% faster |
+| Gradient checkpointing | `use_gradient_checkpointing: true` | -30% VRAM |
+| Smaller model | `d_model: 512, n_layers: 10` | -40% VRAM |
+| Tied embeddings | `tied_embeddings: true` | -10% VRAM |
+| Token merging | `inference_merge_ratio: 0.3` | -30% inference VRAM |
+| Disable MoE | `use_moe: false` | -2 GB VRAM |
 
 ## Resources
 
 - PyTorch docs: https://pytorch.org/docs/
-- CUDA best practices: https://pytorch.org/docs/stable/notes/cuda.html
-- Model training tips: https://pytorch.org/tutorials/recipes/recipes/speed_optimization.html
+- Mamba-3: https://github.com/state-spaces/mamba
+- BitNet: https://arxiv.org/abs/2309.05512

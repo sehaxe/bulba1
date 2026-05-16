@@ -21,6 +21,44 @@ if not HF_TOKEN:
 
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
+# ---------- ЗАГРУЗКА DPO DATASETS ----------
+def download_dpo_dataset(name, config, split, max_rows, local_name):
+    """Загружает DPO датасет и сохраняет как JSONL с messages форматом."""
+    dest = os.path.join(TMP, local_name)
+    if os.path.exists(dest) and os.path.getsize(dest) > 100_000:
+        print(f"  ⏭️ SKIP {local_name}")
+        return True
+    print(f"  📥 DPO: {local_name}...")
+    try:
+        ds = datasets.load_dataset(name, config, split=split, token=HF_TOKEN, trust_remote_code=True)
+        if max_rows and len(ds) > max_rows:
+            ds = ds.select(range(max_rows))
+        with open(dest, "w", encoding="utf-8") as f:
+            for row in tqdm(ds, desc=local_name):
+                if "messages" in row:
+                    f.write(json.dumps({"messages": row["messages"]}) + "\n")
+                elif "prompt" in row and "chosen" in row:
+                    prompt = row["prompt"]
+                    chosen = row["chosen"]
+                    if isinstance(chosen, list) and len(chosen) > 0:
+                        if isinstance(chosen[0], dict) and "content" in chosen[0]:
+                            chosen_text = chosen[0]["content"]
+                        else:
+                            chosen_text = chosen[0] if chosen else ""
+                    else:
+                        chosen_text = str(chosen) if chosen else ""
+                    msgs = [{"role": "user", "content": prompt},
+                            {"role": "assistant", "content": chosen_text}]
+                    f.write(json.dumps({"messages": msgs}) + "\n")
+                elif "conversations" in row:
+                    msgs = [{"role": m["from"], "content": m["value"]} for m in row["conversations"]]
+                    f.write(json.dumps({"messages": msgs}) + "\n")
+        return os.path.getsize(dest) > 100_000
+    except Exception as e:
+        print(f"  ❌ Ошибка DPO {local_name}: {e}")
+        return False
+
+
 # ---------- ЗАГРУЗКА ЧЕРЕЗ DATASETS ----------
 def download_dataset(name, config, split, field, max_rows, local_name):
     """Загружает датасет через `datasets` и сохраняет как JSONL."""
@@ -100,7 +138,34 @@ def main():
     for name, config, split, field, max_rows, local_name in downloads:
         download_dataset(name, config, split, field, max_rows, local_name)
 
-    print("\n✅ Загрузка завершена. Запустите сборку: python scripts/build_and_tokenize.py")
+    # ---------- DPO DATASETS ----------
+    print("\n" + "=" * 60)
+    print("📥 ЗАГРУЗКА DPO DATASETS")
+    print("=" * 60)
+
+    dpo_downloads = [
+        # UltraFeedback - best quality preference dataset (20k for small model)
+        ("argilla/ultrafeedback-binarized-preferences-cleaned", "default", "train", 20_000, "dpo_ultrafeedback.jsonl"),
+        # ORPO-DPO Mix - high quality combined dataset (10k for small model)
+        ("mlabonne/orpo-dpo-mix-40k-flat", "default", "train", 10_000, "dpo_orpo_mix.jsonl"),
+    ]
+
+    for name, config, split, max_rows, local_name in dpo_downloads:
+        download_dpo_dataset(name, config, split, max_rows, local_name)
+
+    # Copy DPO files to data/dpo/
+    dpo_dest = "data/dpo"
+    os.makedirs(dpo_dest, exist_ok=True)
+    for fname in ["dpo_ultrafeedback.jsonl", "dpo_orpo_mix.jsonl"]:
+        src = os.path.join(TMP, fname)
+        if os.path.exists(src):
+            import shutil
+            dst = os.path.join(dpo_dest, fname)
+            shutil.copy(src, dst)
+            print(f"  📦 Скопировано: {fname} -> {dpo_dest}")
+
+    print("\n✅ Загрузка DPO завершена!")
+    print("\n✅ Вся загрузка завершена. Запустите сборку: python scripts/build_and_tokenize.py")
 
 if __name__ == "__main__":
     main()
