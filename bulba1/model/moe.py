@@ -1,3 +1,10 @@
+"""
+Mixture of Experts (MoE) module for Bulba1.
+
+Implements token-choice and expert-choice routing with support for
+shared experts and ReX (reuse) optimization.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,8 +18,9 @@ from bulba1.model.bit_linear import (
 
 
 class Expert(nn.Module):
+    """Single expert layer with configurable activation function."""
     def __init__(self, d_model, hidden_dim, use_bitlinear=True, activation_bits=8,
-                 use_relu2=False, use_absmean_down=False):
+                 activation_fn="gelu", use_absmean_down=False):
         super().__init__()
         if use_bitlinear:
             self.w1 = BitLinear(d_model, hidden_dim, bias=False, activation_bits=activation_bits)
@@ -22,39 +30,18 @@ class Expert(nn.Module):
             self.w1 = nn.Linear(d_model, hidden_dim, bias=False)
             self.w2 = nn.Linear(d_model, hidden_dim, bias=False)
             self.w3 = nn.Linear(hidden_dim, d_model, bias=False)
-        self.use_relu2 = use_relu2
+        self.activation_fn = activation_fn
         self.use_absmean_down = use_absmean_down
         self.use_bitlinear = use_bitlinear
         self.activation_bits = activation_bits
 
     def forward(self, x):
-        h = F.gelu(self.w1(x)) * self.w2(x)
-        if self.use_bitlinear and self.use_absmean_down:
-            h = activation_quant_ste_absmean(h, self.activation_bits)
-        return self.w3(h)
-
-
-class SharedExpert(nn.Module):
-    def __init__(self, d_model, hidden_dim, use_bitlinear=True, activation_bits=8,
-                 use_relu2=False, use_absmean_down=False):
-        super().__init__()
-        Linear = BitLinear if use_bitlinear else nn.Linear
-        self.w1 = (Linear(d_model, hidden_dim, bias=False, activation_bits=activation_bits)
-                   if use_bitlinear else Linear(d_model, hidden_dim, bias=False))
-        self.w2 = (Linear(d_model, hidden_dim, bias=False, activation_bits=activation_bits)
-                   if use_bitlinear else Linear(d_model, hidden_dim, bias=False))
-        self.w3 = (Linear(hidden_dim, d_model, bias=False, activation_bits=activation_bits)
-                   if use_bitlinear else Linear(hidden_dim, d_model, bias=False))
-        self.use_relu2 = use_relu2
-        self.use_absmean_down = use_absmean_down
-        self.use_bitlinear = use_bitlinear
-        self.activation_bits = activation_bits
-
-    def forward(self, x):
-        if self.use_relu2:
+        if self.activation_fn == "relu2":
             h = F.relu(self.w1(x)).pow(2) * self.w2(x)
-        else:
+        elif self.activation_fn == "silu":
             h = F.silu(self.w1(x)) * self.w2(x)
+        else:
+            h = F.gelu(self.w1(x)) * self.w2(x)
         if self.use_bitlinear and self.use_absmean_down:
             h = activation_quant_ste_absmean(h, self.activation_bits)
         return self.w3(h)
@@ -78,24 +65,24 @@ class MoELayer(nn.Module):
         self.expert_choice_capacity = getattr(cfg, "expert_choice_capacity", 0)
 
         abits = getattr(cfg, "bitnet_activation_bits", 8)
-        use_relu2 = getattr(cfg, "a48_use_relu2_glu", False)
+        activation_fn = "relu2" if getattr(cfg, "a48_use_relu2_glu", False) else "gelu"
         use_absmean_down = getattr(cfg, "use_bitnet_a48", False)
 
         self.shared_experts = nn.ModuleList([
-            SharedExpert(cfg.d_model, cfg.expert_hidden, cfg.use_bitlinear,
-                         abits, use_relu2, use_absmean_down)
+            Expert(cfg.d_model, cfg.expert_hidden, cfg.use_bitlinear,
+                   abits, "silu", use_absmean_down)
             for _ in range(self.num_shared_experts)
         ])
 
         if self.use_grouped_gemm:
             self.grouped_experts = GroupedExperts(
                 cfg.num_experts, cfg.d_model, cfg.expert_hidden,
-                cfg.use_bitlinear, abits, use_relu2, use_absmean_down
+                cfg.use_bitlinear, abits, activation_fn, use_absmean_down
             )
         else:
             self.experts = nn.ModuleList([
                 Expert(cfg.d_model, cfg.expert_hidden, cfg.use_bitlinear,
-                       abits, use_relu2, use_absmean_down)
+                       abits, activation_fn, use_absmean_down)
                 for _ in range(cfg.num_experts)
             ])
 

@@ -20,6 +20,7 @@ dependencies = [
     "bitsandbytes>=0.49.0",
     "matplotlib>=3.10.9",
     "transformers>=4.48.0",
+    "python-telegram-bot>=22.7",
 ]
 
 [project.optional-dependencies]

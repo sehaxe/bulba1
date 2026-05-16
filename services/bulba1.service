@@ -1,16 +1,15 @@
 [Unit]
-Description=Bulba1 Training (default config)
+Description=Bulba1 Autonomous Training (27M params)
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/bulba1-python
-ExecStart=%h/bulba1-python/.venv/bin/python -m bulba1.cli --config configs/default.yaml
+ExecStart=/usr/bin/uv run -m bulba1.cli --config configs/default.yaml --auto
 Environment=PYTHONUNBUFFERED=1
 StandardOutput=append:%h/bulba1-python/logs/bulba1.log
 StandardError=append:%h/bulba1-python/logs/bulba1.log
-Restart=on-failure
-RestartSec=10
+Restart=no
 
 [Install]
 WantedBy=default.target

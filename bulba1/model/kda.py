@@ -1,68 +1,13 @@
+"""
+Kimi Delta Attention (KDA) module.
+Efficient sequential implementation with optional torch.compile support.
+"""
+
 import torch
 import torch.nn as nn
 
 from bulba1.model.bit_linear import make_linear
-
-
-def _parallel_scan_affine(a, B):
-    B_batch, T, H, D, _ = B.shape
-    if T == 1:
-        return B
-
-    # Create clean copies detached from computation graph
-    a_cum = a.detach().clone()
-    B_cum = B.detach().clone()
-
-    step = 1
-    while step < T:
-        # Calculate new values for the right half
-        left_size = T - step
-        a_left = a_cum[:, :left_size]
-        B_left = B_cum[:, :left_size]
-        
-        # Compute new values (non-inplace)
-        new_a = a_left * a_cum[:, step:]
-        new_B = new_a * B_left + B_cum[:, step:]
-        
-        # Create new tensors for the next iteration
-        a_new = torch.zeros_like(a_cum)
-        B_new = torch.zeros_like(B_cum)
-        a_new[:, :step] = a_cum[:, :step]
-        a_new[:, step:] = new_a
-        B_new[:, :step] = B_cum[:, :step]
-        B_new[:, step:] = new_B
-        
-        a_cum = a_new
-        B_cum = B_new
-
-        step *= 2
-
-    return B_cum
-
-
-class _RoPEHelper:
-    """RoPE implementaton that works across all PyTorch versions."""
-    def __init__(self, theta=10000.0):
-        self.theta = theta
-
-    def __call__(self, q, k):
-        B, H, T, D = q.shape
-        position = torch.arange(T, device=q.device).float().view(T, 1)
-        dim = torch.arange(0, D, 2).float().to(q.device)
-        freqs = 1.0 / (self.theta ** (dim / D))
-        angles = position * freqs
-        cos = torch.cos(angles).view(1, 1, T, -1)
-        sin = torch.sin(angles).view(1, 1, T, -1)
-
-        def rotate_half(x):
-            x1 = x[..., ::2]
-            x2 = x[..., 1::2]
-            rotated = torch.empty_like(x)
-            rotated[..., ::2] = x1 * cos - x2 * sin
-            rotated[..., 1::2] = x1 * sin + x2 * cos
-            return rotated
-
-        return rotate_half(q), rotate_half(k)
+from bulba1.model.rope import RoPE
 
 
 class KimiDeltaAttention(nn.Module):
@@ -73,7 +18,7 @@ class KimiDeltaAttention(nn.Module):
         self.d_model = cfg.d_model
         self.head_dim = cfg.d_model // cfg.n_heads
         self.gate_dim = getattr(cfg, "kda_gate_dim", 16)
-        self.use_parallel_scan = getattr(cfg, "kda_use_parallel_scan", True)
+        self.use_compile = getattr(cfg, "compile", False) and hasattr(torch, "compile")
         self.use_double_gate = getattr(cfg, "kda_double_gate", True)
         self.use_rope = getattr(cfg, "kda_use_rope", True)
         self.use_quantized_kv_cache = getattr(cfg, "use_quantized_kv_cache", True)
@@ -98,7 +43,11 @@ class KimiDeltaAttention(nn.Module):
         self.norm_q = nn.RMSNorm(self.head_dim)
         self.norm_k = nn.RMSNorm(self.head_dim)
 
+        if self.use_rope:
+            self.rope = RoPE(self.head_dim, getattr(cfg, "max_ctx_len", 4096), getattr(cfg, "rope_theta", 10000.0))
+
     def _forward_sequential(self, q, k, v, gate_f, gate_i=None):
+        """Sequential scan implementation - reliable and correct."""
         B, H, T, D = q.shape
         S = torch.zeros(B, H, D, D, device=q.device, dtype=q.dtype)
         ys = []
@@ -115,31 +64,6 @@ class KimiDeltaAttention(nn.Module):
             y = (q_t.transpose(-2, -1) @ S).squeeze(-2)
             ys.append(y)
         return torch.stack(ys, dim=2)
-
-    def _forward_parallel(self, q, k, v, gate_f, gate_i=None):
-        B, H, T, D = q.shape
-        if gate_i is None:
-            g = gate_f.unsqueeze(-1).unsqueeze(-1)
-            a = g
-            B_mat = (1 - g) * (k.unsqueeze(-1) @ v.unsqueeze(-2))
-        else:
-            f = gate_f.unsqueeze(-1).unsqueeze(-1)
-            i = gate_i.unsqueeze(-1).unsqueeze(-1)
-            a = f
-            B_mat = i * (k.unsqueeze(-1) @ v.unsqueeze(-2))
-
-        # Защита от численного взрыва
-        B_mat = torch.clamp(B_mat, min=-1e4, max=1e4)
-
-        a = a.permute(0, 2, 1, 3, 4)
-        B_mat = B_mat.permute(0, 2, 1, 3, 4)
-
-        S = _parallel_scan_affine(a, B_mat)
-        S = S.permute(0, 2, 1, 3, 4)
-
-        q_exp = q.unsqueeze(-2)
-        out = torch.matmul(q_exp, S).squeeze(-2)
-        return out
 
     def forward(self, x, mask=None, past_kv=None):
         B, T, _ = x.shape
@@ -163,9 +87,8 @@ class KimiDeltaAttention(nn.Module):
         v = v.transpose(1, 2)
 
         if self.use_rope:
-            if not hasattr(self, '_rope_helper'):
-                self._rope_helper = _RoPEHelper()
-            q, k = self._rope_helper(q, k)
+            q = self.rope(q, T)
+            k = self.rope(k, T)
 
         gate_logits = self.gate_proj(x).view(B, T, H, -1)
         if self.use_double_gate:
@@ -177,8 +100,8 @@ class KimiDeltaAttention(nn.Module):
             gate_f = gate.transpose(1, 2)
             gate_i = None
 
-        if self.use_parallel_scan and T > 1:
-            out = self._forward_parallel(q, k, v, gate_f, gate_i)
+        if self.use_compile and self.training:
+            out = torch.compile(self._forward_sequential)(q, k, v, gate_f, gate_i)
         else:
             out = self._forward_sequential(q, k, v, gate_f, gate_i)
 

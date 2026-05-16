@@ -8,6 +8,9 @@ from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
+from dotenv import load_dotenv
+
+load_dotenv()
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -20,7 +23,7 @@ try:
     from telegram_bot.bot_config import BOT_TOKEN, ADMIN_IDS
     _config_source = "bot_config.py"
 except ImportError:
-    BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+    BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", os.environ.get("TELEGRAM_TOKEN", ""))
     ADMIN_IDS = set()
     if os.environ.get("TELEGRAM_ADMIN_ID"):
         ADMIN_IDS = {int(x) for x in os.environ["TELEGRAM_ADMIN_ID"].split(",")}

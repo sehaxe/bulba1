@@ -413,6 +413,11 @@ class SmartTokenizer:
             raise RuntimeError("Tokenizer not loaded")
         return self.tokenizer.decode(ids)
 
+    def encode_batch(self, texts: list[str]) -> list[list[int]]:
+        if self.tokenizer is None:
+            raise RuntimeError("Tokenizer not loaded")
+        return [r.ids for r in self.tokenizer.encode_batch(texts)]
+
     def get_vocab_size(self) -> int:
         if self.tokenizer is not None:
             return self.tokenizer.get_vocab_size()

@@ -9,9 +9,8 @@ import sys
 from pathlib import Path
 
 import torch
-import yaml
 
-from bulba1.config import ModelConfig
+from bulba1.config import load_config
 from bulba1.model.minichat import MiniChat
 from bulba1.tokenizer import FastTokenizer, HFTokenizer, create_dataloader
 from bulba1.training.engine import TrainingEngine
@@ -40,7 +39,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Полный пайплайн
     if args.full:
         from bulba1.orchestrator import BulbaOrchestrator
 
@@ -48,19 +46,7 @@ def main():
         orch.run_full(skip_download=args.skip_download, skip_build=args.skip_build)
         return
 
-    # Загружаем YAML
-    with open(args.config) as f:
-        yaml_cfg = yaml.safe_load(f)
-    all_params = {}
-    all_params.update(yaml_cfg.get("model", {}))
-    all_params.update(yaml_cfg.get("training", {}))
-    if args.auto and "autonomy" in yaml_cfg:
-        class AutonomyConfig:
-            def __init__(self, **kw):
-                for k, v in kw.items():
-                    setattr(self, k, v)
-        all_params["autonomy"] = AutonomyConfig(**yaml_cfg["autonomy"])
-    cfg = ModelConfig(**all_params)
+    cfg = load_config(args.config)
     print(f"📄 Загружен конфиг из {args.config}")
 
     # Устройство
@@ -72,16 +58,15 @@ def main():
     if device.type == "cuda":
         print(f"   GPU: {torch.cuda.get_device_name(0)}")
 
-    data_dir = getattr(cfg, "data_dir", "data/tokenized")
-    batch_size = getattr(cfg, "batch_size", 1)
-    seq_len = getattr(cfg, "seq_len", 512)
+    data_dir = cfg.data_dir
+    batch_size = cfg.batch_size
+    seq_len = cfg.seq_len
 
-    # Токенизатор
     if os.path.exists("data/tokenizer_fast.json"):
         tokenizer = FastTokenizer("data/tokenizer_fast.json")
         tokenizer.load()
     else:
-        tokenizer = HFTokenizer(vocab_size=getattr(cfg, "vocab_size", 26000))
+        tokenizer = HFTokenizer(vocab_size=cfg.vocab_size)
         if not os.path.exists(tokenizer.model_path):
             files = list(Path(data_dir).rglob("*.txt"))
             if not files:
@@ -91,9 +76,8 @@ def main():
             tokenizer.load()
     print(f"🔤 Vocab size: {tokenizer.vocab_size}")
 
-    # DataLoader
-    num_workers = getattr(cfg, "num_workers", 2)
-    prefetch_factor = getattr(cfg, "prefetch_factor", 4)
+    num_workers = cfg.num_workers
+    prefetch_factor = cfg.prefetch_factor
     loader = create_dataloader(
         tokenizer,
         data_dir,
@@ -114,10 +98,10 @@ def main():
     # Модель
     print("🏗️  Создание модели...")
     model = MiniChat(cfg).to(device)
-    if getattr(cfg, "use_f16", False):
+    if cfg.use_f16:
         model = model.to(torch.bfloat16)
         print("🔧 Модель приведена к bfloat16")
-    should_compile = args.compile or getattr(cfg, "compile", False)
+    should_compile = args.compile or cfg.compile
     if should_compile and hasattr(torch, "compile"):
         model = torch.compile(model, mode="reduce-overhead", fullgraph=False, dynamic=True)
         print("⚡ torch.compile включён")
@@ -142,11 +126,11 @@ def main():
     )
 
     # Auto SFT after main training
-    if getattr(cfg, "auto_sft", False):
-        sft_data = getattr(cfg, "auto_sft_data", "data/sft")
+    if cfg.auto_sft:
+        sft_data = cfg.auto_sft_data
         sft_data_file = os.path.join(sft_data, "sft_claude_opus47.jsonl")
-        sft_epochs = getattr(cfg, "auto_sft_epochs", 3)
-        sft_lr = getattr(cfg, "auto_sft_lr", 1.0e-5)
+        sft_epochs = cfg.auto_sft_epochs
+        sft_lr = cfg.auto_sft_lr
         
         print(f"\n🎯 Запуск SFT (data={sft_data_file}, epochs={sft_epochs}, lr={sft_lr})...")
         
@@ -162,12 +146,12 @@ def main():
         print(f"✅ SFT завершён!")
 
     # Auto DPO after SFT
-    if getattr(cfg, "auto_dpo", False):
-        dpo_data = getattr(cfg, "auto_dpo_data", "data/dpo")
+    if cfg.auto_dpo:
+        dpo_data = cfg.auto_dpo_data
         dpo_data_file = os.path.join(dpo_data, "train.jsonl")
-        dpo_epochs = getattr(cfg, "auto_dpo_epochs", 3)
-        dpo_lr = getattr(cfg, "auto_dpo_lr", 1.0e-6)
-        dpo_beta = getattr(cfg, "auto_dpo_beta", 0.1)
+        dpo_epochs = cfg.auto_dpo_epochs
+        dpo_lr = cfg.auto_dpo_lr
+        dpo_beta = cfg.auto_dpo_beta
         
         print(f"\n🎯 Запуск DPO (data={dpo_data_file}, epochs={dpo_epochs}, lr={dpo_lr}, beta={dpo_beta})...")
         

@@ -37,17 +37,6 @@ def activation_quant_ste_absmean(x: torch.Tensor, num_bits: int = 4) -> torch.Te
     return x_ste * scale
 
 
-def fp4_quant_ste(x: torch.Tensor, M: int = 3, b: int = 2) -> torch.Tensor:
-    abs_x = x.abs()
-    log2_abs = torch.log2(abs_x.clamp_min(1e-8))
-    gamma = 2 ** torch.clamp(torch.floor(log2_abs) + b, min=1.0)
-    denom = 2 ** (M + b)
-    scale = gamma / denom
-    x_quant = torch.round(x / scale)
-    x_ste = (x_quant - x / scale).detach() + x / scale
-    return x_ste * scale
-
-
 def q_int4_ste(x: torch.Tensor) -> torch.Tensor:
     """4-bit integer quantization (absmean) for activations."""
     beta = x.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
@@ -55,17 +44,6 @@ def q_int4_ste(x: torch.Tensor) -> torch.Tensor:
     x_norm = x / scale
     x_quant = torch.round(torch.clamp(x_norm, -8, 7))
     return ((x_quant - x_norm).detach() + x_norm) * scale
-
-
-def q_fp4_ste(x: torch.Tensor, M: int = 2, E: int = 2) -> torch.Tensor:
-    """4-bit floating-point quantization (E2M1 format)."""
-    abs_x = x.abs()
-    log2_abs = torch.log2(abs_x.clamp_min(1e-8))
-    gamma = 2 ** torch.clamp(torch.floor(log2_abs) + (2**E - 1), min=1.0)
-    denom = 2 ** (M + 2**E - 1)
-    scale = gamma / denom
-    x_quant = torch.round(x / scale)
-    return (x_quant - x / scale).detach() + x * scale
 
 
 def topk_sparsify(x: torch.Tensor, k: float = 0.5) -> torch.Tensor:
@@ -128,6 +106,17 @@ def make_linear(
             quantize_input=quantize_input,
         )
     return nn.Linear(in_features, out_features, bias=bias)
+
+
+# Future: Triton-based BitLinear for acceleration
+# Set use_triton_bitlinear=True in config to enable (when available)
+def triton_bitlinear_available():
+    """Check if Triton BitLinear kernel is available."""
+    try:
+        import triton
+        return True
+    except ImportError:
+        return False
 
 
 class BitLinear(nn.Module):

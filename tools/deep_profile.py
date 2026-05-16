@@ -14,8 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import yaml
-from bulba1.config import ModelConfig
+from bulba1.config import load_config
 from bulba1.model.minichat import MiniChat
 from bulba1.training.optimizer import CombinedOptimizer
 
@@ -34,12 +33,7 @@ class DeepProfiler:
         self.cfg = None
 
     def load_config(self):
-        with open(self.cfg_path, 'r') as f:
-            yaml_cfg = yaml.safe_load(f)
-        all_params = {}
-        all_params.update(yaml_cfg.get('model', {}))
-        all_params.update(yaml_cfg.get('training', {}))
-        self.cfg = ModelConfig(**all_params)
+        self.cfg = load_config(self.cfg_path)
         self.results["config"] = {
             "d_model": self.cfg.d_model,
             "n_layers": self.cfg.n_layers,
@@ -92,7 +86,7 @@ class DeepProfiler:
                 t0 = time.perf_counter()
 
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    logits, _, _, aux_loss = self.model(x, 1)
+                    logits, _, _, aux_loss = self.model(x)
 
                 text_logits = logits[:, self.cfg.num_clr_tokens:self.cfg.num_clr_tokens+self.seq_len, :].reshape(-1, self.cfg.vocab_size)
                 loss = torch.nn.functional.cross_entropy(text_logits.float(), targets.reshape(-1))
@@ -306,7 +300,7 @@ class DeepProfiler:
 
         try:
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                logits, _, _, aux_loss = self.model(x, 1)
+                logits, _, _, aux_loss = self.model(x)
 
             text_logits = logits[:, self.cfg.num_clr_tokens:self.cfg.num_clr_tokens+self.seq_len, :].reshape(-1, self.cfg.vocab_size)
             loss = torch.nn.functional.cross_entropy(text_logits.float(), targets.reshape(-1))
