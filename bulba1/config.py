@@ -119,6 +119,14 @@ class ModelConfig(BaseModel):
     # ── Triton Acceleration ──
     use_triton_bitlinear: bool = False
 
+    # ── Distributed Training ──
+    distributed: bool = False
+
+    # ── Logging ──
+    use_tensorboard: bool = False
+    use_wandb: bool = False
+    wandb_project: str = "bulba1"
+
     # ── Optimizer ──
     use_muon: bool = True
     muon_nesterov: bool = True

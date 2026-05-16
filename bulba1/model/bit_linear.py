@@ -98,12 +98,14 @@ def make_linear(
 ):
     if getattr(cfg, "use_bitlinear", False):
         abits = getattr(cfg, "bitnet_activation_bits", 8)
+        use_triton = getattr(cfg, "use_triton_bitlinear", False)
         return BitLinear(
             in_features,
             out_features,
             bias=bias,
             activation_bits=abits,
             quantize_input=quantize_input,
+            use_triton=use_triton,
         )
     return nn.Linear(in_features, out_features, bias=bias)
 
@@ -127,12 +129,14 @@ class BitLinear(nn.Module):
         bias: bool = False,
         activation_bits: int = 8,
         quantize_input: bool = True,
+        use_triton: bool = False,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.activation_bits = activation_bits
         self.quantize_input = quantize_input
+        self._use_triton = use_triton
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
@@ -146,6 +150,20 @@ class BitLinear(nn.Module):
             nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Try Triton if enabled and available
+        if (getattr(self, '_use_triton', False) and 
+            self.training and 
+            x.is_cuda and 
+            self.weight.is_cuda):
+            try:
+                from bulba1.triton_ops.bitlinear import triton_bitlinear_available
+                if triton_bitlinear_available():
+                    from bulba1.triton_ops.bitlinear import triton_bitlinear_forward
+                    return triton_bitlinear_forward(x, self.weight, self.bias)
+            except Exception:
+                pass  # Fall back to Python
+        
+        # Python implementation (default)
         w = ste_b158(self.weight).to(x.dtype)
         if self.quantize_input:
             x = activation_quant_ste(x, self.activation_bits)
