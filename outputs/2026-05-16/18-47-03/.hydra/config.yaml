@@ -1,4 +1,0 @@
-config_file: configs/default.yaml
-experiment:
-  name: bulba1_default
-  seed: 42

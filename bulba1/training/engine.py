@@ -13,6 +13,7 @@ from bulba1.training.chunked_ce import chunked_cross_entropy
 from bulba1.training.ema import EMA
 from bulba1.training.eval import compute_perplexity, generate_samples, run_eval
 from bulba1.training.monitor import SystemMonitor, preflight_memory_test
+from bulba1.logger import get_logger
 from bulba1.training.optimizer import CombinedOptimizer
 from bulba1.training.stages import stage_for_step
 
@@ -41,14 +42,14 @@ class TrainingEngine:
             else 0
         )
         self.optimizer = CombinedOptimizer(model, cfg)
-        self.ema = EMA(model, decay=cfg.ema_decay)
+        self.ema = EMA(model, decay=self.cfg.ema_decay)
         self.checkpoint_mgr = CheckpointManager(
-            cfg.checkpoint_dir, keep_top_k=cfg.checkpoint_keep_top_k
+            self.cfg.checkpoint_dir, keep_top_k=self.cfg.checkpoint_keep_top_k
         )
 
-        self.use_amp = cfg.use_f16
+        self.use_amp = self.cfg.use_f16
         self.use_chunked_ce = (
-            cfg.vocab_size > cfg.auto_chunked_ce_threshold
+            self.cfg.vocab_size > self.cfg.auto_chunked_ce_threshold
             if hasattr(cfg, "auto_chunked_ce_threshold")
             else False
         )
@@ -56,7 +57,7 @@ class TrainingEngine:
 
         self.monitor = SystemMonitor(self.device, interval_sec=5.0)
 
-        self.log_dir = Path(cfg.log_dir)
+        self.log_dir = Path(self.cfg.log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._run_eval = run_eval
 
@@ -71,7 +72,12 @@ class TrainingEngine:
         self.oom_count = 0
         self.batch_reductions = 0
         self.model_params = sum(p.numel() for p in model.parameters())
-        self.chinchilla_target = self.model_params * 20 * getattr(cfg, "epochs", 2)
+        self.active_params = self.model_params
+        if getattr(cfg, 'use_moe', False) and cfg.num_experts > 1:
+            moe_ratio = (cfg.top_k + getattr(cfg, 'num_shared_experts', 0)) / cfg.num_experts
+            self.active_params = int(self.model_params * moe_ratio)
+        chinchilla_ratio = getattr(cfg, 'chinchilla_ratio', 20)
+        self.chinchilla_target = self.active_params * chinchilla_ratio
 
     def _update_grad_accum(self, step: int, total: int):
         if not getattr(self.cfg, "dynamic_batch", True):
@@ -87,25 +93,29 @@ class TrainingEngine:
 
         if getattr(self.cfg, "use_chinchilla_steps", True):
             self._recalc_chinchilla_steps()
-            print(f"[Chinchilla] {self.model_params/1e6:.1f}M params × 20 = {self.chinchilla_target/1e9:.2f}B tokens")
-            print(f"[Chinchilla] {self.cfg.batch_size}×{self.grad_accum_steps}×{self.cfg.seq_len} = {self.cfg.batch_size * self.grad_accum_steps * self.cfg.seq_len} tok/step → {self.cfg.total_steps} steps")
+            # print(f"[Chinchilla] {self.model_params/1e6:.1f}M params × 20 = {self.chinchilla_target/1e9:.2f}B tokens")
+            # print(f"[Chinchilla] {self.cfg.batch_size}×{self.grad_accum_steps}×{self.cfg.seq_len} = {self.cfg.batch_size * self.grad_accum_steps * self.cfg.seq_len} tok/step → {self.cfg.total_steps} steps")
 
         if self.auto_mode:
-            self.autopilot = AutoPilot(self.cfg, log_dir=self.cfg.log_dir)
+            self.auto_mode = AutoPilot(self.cfg, log_dir=self.cfg.log_dir)
         else:
-            self.autopilot = None
+            self.auto_mode = None
 
     # ------------------------------------------------------------------
     def _optimizer_step(self, step=0, total_steps=1):
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
+        # NASA Rule #1: Vectorized gradient noise using torch._foreach
         noise_level = float(getattr(self.cfg, "gradient_noise", 0.0))
         if noise_level > 0.0:
             decay = 1.0 - step / max(1, total_steps)
             std = noise_level * decay
-            for p in self.model.parameters():
-                if p.grad is not None:
-                    p.grad.add_(torch.randn_like(p.grad) * std)
-        self.optimizer.step()
+            
+            grads = [p.grad for p in self.model.parameters() if p.grad is not None]
+            if grads:
+                noise = [torch.randn_like(g) * std for g in grads]
+                torch._foreach_add_(grads, noise)  # C-level vectorized
+        
+            self.optimizer.step()
         self.optimizer.zero_grad()
         return grad_norm
 
@@ -138,11 +148,17 @@ class TrainingEngine:
         new_bs = max(self.cfg.min_batch_size, old_bs - 2)
         if new_bs == old_bs:
             return False
+        
+        # Maintain constant global batch size
+        global_bs = old_bs * self.grad_accum_steps
+        new_accum = (global_bs + new_bs - 1) // new_bs
+
         self.cfg.batch_size = new_bs
+        self.grad_accum_steps = max(1, new_accum)
         self.batch_reductions += 1
         if getattr(self.cfg, "use_chinchilla_steps", True):
             self._recalc_chinchilla_steps()
-        print(f"[OOM] batch_size {old_bs} -> {new_bs}, total_steps -> {self.cfg.total_steps}")
+        print(f"[OOM] batch_size {old_bs} -> {new_bs}, grad_accum_steps -> {self.grad_accum_steps}, total_steps -> {self.cfg.total_steps}")
         torch.cuda.empty_cache()
         return True
 
@@ -183,7 +199,10 @@ class TrainingEngine:
         if self.model.training and tok_drop > 0:
             mask = torch.rand_like(input_ids, dtype=torch.float32) > tok_drop
             input_ids = torch.where(mask, input_ids, torch.full_like(input_ids, self.cfg.pad_id))
-        logits, mtp1, mtp2, aux_loss = self.safe_forward(input_ids)
+        out = self.safe_forward(input_ids)
+        logits = out[0]
+        mtp_outputs = out[1:-1]  # List of MTP head outputs
+        aux_loss = out[-1]
         text_logits = logits[:, clr : clr + T, :].reshape(-1, self.cfg.vocab_size)
         loss_main = self.compute_loss(text_logits, targets.reshape(-1))
         loss_total = loss_main
@@ -192,14 +211,30 @@ class TrainingEngine:
                 sg_loss = self._skip_gram_loss(logits[:, clr : clr + T, :], targets, k - 1)
                 if sg_loss.detach() > 0:
                     loss_total = loss_total + self.cfg.skip_gram_weight * sg_loss
-        if mtp1 is not None:
-            loss_mtp1 = self.compute_loss(mtp1[:, clr : clr + T, :].reshape(-1, self.cfg.vocab_size), targets.reshape(-1))
-            scale = self._mtp_scale(step, total_steps, self.cfg.mtp1_warmup_steps)
-            loss_total = loss_total + scale * self.cfg.loss_mtp1_weight * loss_mtp1
-        if mtp2 is not None:
-            loss_mtp2 = self.compute_loss(mtp2[:, clr : clr + T, :].reshape(-1, self.cfg.vocab_size), targets.reshape(-1))
-            scale = self._mtp_scale(step, total_steps, self.cfg.mtp2_warmup_steps)
-            loss_total = loss_total + scale * self.cfg.loss_mtp2_weight * loss_mtp2
+        # MTP losses (supports up to 5 heads dynamically)
+        mtp_weights = [
+            getattr(self.cfg, "loss_mtp1_weight", 0.4),
+            getattr(self.cfg, "loss_mtp2_weight", 0.3),
+            getattr(self.cfg, "loss_mtp3_weight", 0.2),
+            getattr(self.cfg, "loss_mtp4_weight", 0.1),
+            getattr(self.cfg, "loss_mtp5_weight", 0.05),
+        ]
+        mtp_warmups = [
+            getattr(self.cfg, "mtp1_warmup_steps", 1000),
+            getattr(self.cfg, "mtp2_warmup_steps", 3000),
+            getattr(self.cfg, "mtp3_warmup_steps", 6000),
+            getattr(self.cfg, "mtp4_warmup_steps", 10000),
+            getattr(self.cfg, "mtp5_warmup_steps", 15000),
+        ]
+        
+        for i, mtp_out in enumerate(mtp_outputs):
+            if mtp_out is not None and i < len(mtp_weights):
+                loss_mtp = self.compute_loss(
+                    mtp_out[:, clr : clr + T, :].reshape(-1, self.cfg.vocab_size),
+                    targets.reshape(-1)
+                )
+                scale = self._mtp_scale(step, total_steps, mtp_warmups[i])
+                loss_total = loss_total + scale * mtp_weights[i] * loss_mtp
         loss_total = loss_total + aux_loss * self.cfg.router_z_loss_coef
         return loss_main, loss_total
 
@@ -219,8 +254,8 @@ class TrainingEngine:
 
     # ------------------------------------------------------------------
     def compute_lr(self, step: int, total: int) -> float:
-        if self.autopilot is not None:
-            return self.autopilot.compute_lr(step)
+        if self.auto_mode is not None:
+            return self.auto_mode.compute_lr(step)
 
         base_lr = self.cfg.learning_rate
         warmup = int(total * self.cfg.warmup_ratio) if self.cfg.warmup_ratio > 0 else 0
@@ -467,7 +502,7 @@ class TrainingEngine:
             if eval_every > 0 and (step + 1) % eval_every == 0:
                 self.model.eval()
                 if eval_loader:
-                    ppl = compute_perplexity(self.model, eval_loader, self.device, cfg.eval_max_batches)
+                    ppl = compute_perplexity(self.model, eval_loader, self.device, self.cfg.eval_max_batches)
                     print(f"[EVAL] Step {step+1}: perplexity={ppl:.2f}")
                     self._log_eval(step, ppl)
                 self.model.train()
@@ -488,8 +523,8 @@ class TrainingEngine:
             if (step + 1) % log_every == 0 or step == 0:
                 self._log_status(step, total_steps, loss_val, stage, lr)
 
-            if self.autopilot is not None and self.ema_loss is not None:
-                action = self.autopilot.step(step, self.ema_loss)
+            if self.auto_mode is not None and self.ema_loss is not None:
+                action = self.auto_mode.step(step, self.ema_loss)
                 if action["action"] != "none":
                     details = {k: v for k, v in action.items() if k != "action"}
                     print(f"[AUTO] {action['action']}: {details}")
@@ -509,8 +544,8 @@ class TrainingEngine:
 
     def _save_checkpoint(self, step: int, loss_val: float, lr: float, stage_name: str):
         config_meta = {"lr": lr, "stage": stage_name}
-        if self.autopilot is not None:
-            config_meta["autopilot"] = self.autopilot.state_dict()
+        if self.auto_mode is not None:
+            config_meta["auto_mode"] = self.auto_mode.state_dict()
         self.checkpoint_mgr.save(
             self.model,
             self.optimizer,
@@ -534,36 +569,27 @@ class TrainingEngine:
             loaded_step = 0
             print(f"[WARN] Could not load checkpoint: {checkpoint_arg}")
         else:
-            if self.autopilot is not None and self.auto_mode:
+            if self.auto_mode is not None and self.auto_mode:
                 import json, os
                 meta_path = path.replace(".safetensors", ".json")
                 if os.path.exists(meta_path):
                     with open(meta_path) as f:
                         meta = json.load(f)
-                    ap_state = meta.get("config", {}).get("autopilot")
+                    ap_state = meta.get("config", {}).get("auto_mode")
                     if ap_state:
-                        self.autopilot.load_state_dict(ap_state)
+                        self.auto_mode.load_state_dict(ap_state)
                         print(f"[RESUME] Autopilot state restored")
             print(f"[RESUME] Loaded checkpoint at step {loaded_step}")
         return loaded_step
 
     def _log_eval(self, step: int, ppl: float):
-        rec = {
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "step": step + 1, "type": "eval", "perplexity": round(ppl, 2),
-        }
-        with open(self.log_dir / "eval.jsonl", "a") as f:
-            f.write(json.dumps(rec) + "\n")
+        logger = get_logger(str(self.log_dir))
+        logger.log("eval", step=step + 1, perplexity=round(ppl, 2))
 
     def _log_gen(self, step: int, samples: list[str], prompts: list[str]):
-        with open(self.log_dir / "gen.jsonl", "a") as f:
-            for p, s in zip(prompts, samples):
-                rec = {
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "step": step + 1, "prompt": p, "generated": s,
-                }
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            f.flush()
+        logger = get_logger(str(self.log_dir))
+        for p, s in zip(prompts, samples):
+            logger.log("gen", step=step + 1, prompt=p, generated=s)
 
     def _log_status(self, step, total_steps, loss_val, stage, lr):
         elapsed = time.time() - self.start_time

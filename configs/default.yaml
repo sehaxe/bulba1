@@ -1,11 +1,8 @@
 model:
-  # ── Core architecture ──
   d_model: 512
-  n_layers: 10
+  n_layers: 16
   n_heads: 8
   vocab_size: 26000
-
-  # ── MoE ──
   num_experts: 4
   top_k: 2
   expert_hidden: 512
@@ -13,14 +10,10 @@ model:
   use_rex: true
   rex_reuse_weight: 0.1
   num_shared_experts: 3
-
-  # ── KDA enhancements ──
   kda_use_rope: true
   kda_double_gate: true
   use_expert_choice: false
   expert_choice_capacity: 0
-
-  # ── Attention (DiffAttention) ──
   use_diff_attn: true
   use_mla: true
   mla_latent_dim: 32
@@ -28,12 +21,10 @@ model:
   use_per_head_gating: true
   use_value_residuals: true
   rope_theta: 10000.0
-  max_ctx_len: 4096
+  max_ctx_len: 32768
   sliding_window_size: 512
   lambda_init: 0.8
-
-  # ── Mamba ──
-  use_mamba: true
+  use_mamba: false
   mamba_d_state: 128
   mamba_d_conv: 4
   mamba_expand: 2
@@ -41,21 +32,16 @@ model:
   use_kda: true
   kda_use_parallel_scan: true
   kda_gate_dim: 16
-
-  # ── MHC (DeepSeek) ──
-  use_mhc: true
-  mhc_n: 4
-  mhc_iterations: 4
-
-  # ── Efficiency techniques ──
+  use_attn_res: true
+  attn_res_num_blocks: 8
+  attn_res_recency_bias_init: 10.0
+  attn_res_mode: block
   num_unique_blocks: 4
   recurrent_repeats: 3
   merge_every_n_layers: 2
   inference_merge_ratio: 0.3
   use_mixture_of_depths: true
   mod_capacity: 0.75
-
-  # ── CLR / MTP / Skip-gram ──
   num_clr_tokens: 4
   use_mtp: true
   mtp1_warmup_steps: 1500
@@ -64,20 +50,14 @@ model:
   use_skip_gram: true
   skip_gram_range: 3
   skip_gram_weight: 0.05
-
-  # ── Initialization ──
   init_std: 0.02
   depth_scaled_init: true
-
-  # ── Loss coefficients ──
   router_z_loss_coef: 0.001
   router_entropy_coef: 0.001
   attn_z_loss_coef: 0.0001
   loss_mtp1_weight: 0.3
   loss_mtp2_weight: 0.1
   label_smoothing: 0.05
-
-  # ── Quantization ──
   use_bitlinear: true
   bitnet_activation_bits: 8
   use_f16: true
@@ -95,8 +75,6 @@ model:
   a48_stage1_steps_ratio: 0.95
   a48_stage1_bits: 8
   a48_stage2_bits: 4
-
-  # ── Optimizer ──
   use_muon: true
   muon_nesterov: true
   muon_ns_steps: 3
@@ -109,12 +87,10 @@ model:
   weight_decay: 0.1
   beta1: 0.9
   beta2: 0.95
-  eps: 1.0e-8
+  eps: 1.0e-08
   max_grad_norm: 1.0
   ema_decay: 0.999
   ema_vram_threshold: 0.45
-
-  # ── VRAM / OOM safety ──
   vram_warn_pct: 88.0
   vram_critical_pct: 95.0
   max_batch_reductions: 6
@@ -122,11 +98,14 @@ model:
   vram_safety_factor: 0.75
   vram_overhead_mb: 3072.0
   vram_overhead_factor: 1.35
-
+  use_kimi_linear: true
+  kimi_local_window: 512
+  kimi_gate_dim: 16
+  kimi_double_gate: true
+  kimi_use_rope: true
 training:
-  # ── Schedule ──
   seq_len: 512
-  batch_size: 32
+  batch_size: 28
   skip_preflight: true
   grad_accum_steps: 2
   total_steps: 38035
@@ -137,60 +116,40 @@ training:
   use_mtp_cooldown: true
   mtp_cooldown_ratio: 0.15
   mtp_end_scale: 0.1
-
-  # Быстрый curriculum: 1000 шагов разгона с 64 до 512 токенов
   curriculum_warmup_ratio: 0.15
   curriculum_start_seq_len: 128
-
-  # ── Checkpointing ──
   checkpoint_every: 1000
   checkpoint_keep_top_k: 3
-  checkpoint_dir: "checkpoints/run_bulba1_27m"
+  checkpoint_dir: checkpoints/run_bulba1_27m
   log_every: 50
   eval_every: 500
   eval_max_batches: 10
   gen_every: 2000
-
-  # ── Regularization ──
   dropout: 0.05
   label_smoothing: 0.05
-  gradient_noise: 3.0e-5
+  gradient_noise: 3.0e-05
   stochastic_depth_prob: 0.1
   token_dropout: 0.05
-
-  # ── Data ──
-  data_dir: "data/tokenized"
-  val_data_dir: "data/tokenized"
-  log_dir: "logs"
+  data_dir: data/tokenized
+  val_data_dir: data/tokenized
+  log_dir: logs
   num_workers: 0
   prefetch_factor: 4
-
-  # ── Precision ──
   use_f16: true
   use_gradient_checkpointing: true
   compile: false
-
-  # ── Chunked CE ──
   chunk_size: 8192
   auto_chunked_ce_threshold: 0
   ignore_index: -100
-
-  # ── Tokenizer IDs ──
   bos_id: 1
   eos_id: 2
   pad_id: 0
-
-  # ── Auto Training Pipeline ──
-  # After main training completes, automatically run SFT and/or DPO
   auto_sft: true
-  auto_sft_data: "data/sft"
+  auto_sft_data: data/sft
   auto_sft_epochs: 3
-  auto_sft_lr: 1.0e-5
-
+  auto_sft_lr: 1.0e-05
   auto_dpo: true
-  auto_dpo_data: "data/dpo"
+  auto_dpo_data: data/dpo
   auto_dpo_epochs: 3
-  auto_dpo_lr: 1.0e-6
+  auto_dpo_lr: 1.0e-06
   auto_dpo_beta: 0.1
-
-

@@ -1,0 +1,116 @@
+model:
+  # ── Core Architecture (485M total, 178M active) ──
+  d_model: 768
+  n_layers: 12
+  n_heads: 12
+  vocab_size: 32000
+
+  # ── MoE (умная часть - оставляем) ──
+  use_moe: true
+  num_experts: 8
+  top_k: 2
+  expert_hidden: 1536
+  num_shared_experts: 1
+  use_rex: false
+
+  # ── DiffAttention (умная часть - оставляем) ──
+  use_diff_attn: true
+  use_mla: false
+  max_ctx_len: 2048
+  rope_theta: 10000.0
+  use_qk_norm: true
+  use_per_head_gating: true
+  use_value_residuals: true          # ← +5% reasoning, 0 параметров
+
+  # ── BitNet a4.8 (умная часть - оставляем) ──
+  use_bitlinear: true
+  use_bitnet_a48: true
+  bitnet_activation_bits: 8
+  a48_attn_topk_sparsity: 0.5
+  a48_two_stage_training: true
+  a48_stage1_steps_ratio: 0.95
+  a48_stage1_bits: 8
+  a48_stage2_bits: 4
+  a48_use_relu2_glu: true
+
+  # ── KDA (умная часть - оставляем для reasoning) ──
+  use_kda: true
+  kda_use_rope: false
+
+  # ── AttnRes (умная часть - оставляем) ──
+  use_attn_res: true
+  attn_res_mode: "block"
+  attn_res_num_blocks: 4
+  attn_res_recency_bias_init: 10.0
+
+  # ── MTP (1 head, минимум оверхеда) ──
+  use_mtp: true
+  num_mtp_heads: 1
+  loss_mtp1_weight: 0.3
+
+  # ── Muon (умный оптимизатор) ──
+  use_muon: true
+  muon_nesterov: true
+  muon_ns_steps: 5
+  muon_min_dim: 2
+  muon_momentum: 0.95
+
+  # ── Training params ──
+  learning_rate: 0.001
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-08
+  max_grad_norm: 1.0
+  init_std: 0.02
+  use_mup_init: true
+  tied_embeddings: true
+  router_z_loss_coef: 0.001
+  router_entropy_coef: 0.001
+  attn_z_loss_coef: 0.0001
+  label_smoothing: 0.05
+
+training:
+  # ── Batch & Sequence ──
+  batch_size: 24
+  grad_accum_steps: 3
+  seq_len: 1024
+
+  # ── Chinchilla Auto-Scaling ──
+  use_chinchilla_steps: true
+  chinchilla_ratio: 20
+  total_steps: 150000               # ← Будет пересчитано автоматически
+
+  # ── Curriculum ──
+  curriculum_start_seq_len: 256
+  curriculum_warmup_ratio: 0.05
+  warmup_ratio: 0.05
+
+  # ── Checkpointing ──
+  checkpoint_every: 1000
+  checkpoint_keep_top_k: 3
+  checkpoint_dir: checkpoints/run_bulba1_micro_chat
+  log_every: 20
+  log_dir: logs
+
+  # ── Data ──
+  data_dir: data/tokenized
+  val_data_dir: data/tokenized
+  num_workers: 0
+  prefetch_factor: 4
+
+  # ── VRAM Safety ──
+  vram_warn_pct: 88.0
+  vram_critical_pct: 95.0
+  max_batch_reductions: 4
+  min_batch_size: 8
+
+  # ── Precision ──
+  use_f16: true
+  compile: true
+
+  # ── Token IDs ──
+  bos_id: 1
+  eos_id: 2
+  pad_id: 0
+  ignore_index: -100

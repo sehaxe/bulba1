@@ -37,7 +37,10 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+        # Compute variance in float32 to prevent bfloat16 underflow/NaN
+        variance = x.float().pow(2).mean(-1, keepdim=True)
+        x_normed = x * torch.rsqrt(variance + self.eps)
+        return x_normed.to(x.dtype) * self.weight
 
 
 class RoPE(nn.Module):
@@ -54,26 +57,57 @@ class RoPE(nn.Module):
         self.register_buffer("cos", emb.cos()[None, None, :, :])
         self.register_buffer("sin", emb.sin()[None, None, :, :])
 
-    def apply_yarn(self, new_max_len: int, scale: float | None = None):
+    def apply_yarn(self, new_max_len: int, original_len: int = 4096, alpha: float = 1.0, beta: float = 32.0):
+        """
+        YaRN: NTK-by-parts interpolation for context extension.
+        Based on arXiv:2309.00071.
+        
+        Args:
+            new_max_len: Target context length
+            original_len: Original training context length
+            alpha: Lower bound for interpolation (default 1.0)
+            beta: Upper bound for extrapolation (default 32.0)
+        """
         if new_max_len <= self.max_seq_len:
             return
-        if scale is None:
-            scale = (new_max_len / self.max_seq_len) ** 0.5
-        d2 = self.dim // 2
+        
+        s = new_max_len / original_len
+        
+        # Temperature scaling (Eq 15 from YaRN paper)
+        self.attn_scale = 0.1 * math.log(s) + 1
+        
+        # NTK-by-parts interpolation
+        d = self.dim // 2
         freqs = 1.0 / (self.theta ** (torch.arange(0, self.dim, 2).float() / self.dim))
-        ramp = torch.linspace(0, 1, d2)
-        gamma = 1.0 / (1.0 + ramp * (scale - 1.0))
-        scaled_freqs = freqs * gamma
+        
+        # Wavelength-based ramp function
+        wavelengths = 2 * math.pi / freqs
+        r = original_len / wavelengths
+        
+        # Ramp: 0 if r < alpha, 1 if r > beta, linear in between
+        gamma = torch.clamp((r - alpha) / (beta - alpha), 0, 1)
+        
+        # Interpolate frequencies
+        scaled_freqs = (1 - gamma) * (freqs / s) + gamma * freqs
+        
+        # Update buffers
         t = torch.arange(new_max_len, dtype=torch.float32)
         emb = torch.cat([torch.outer(t, scaled_freqs)] * 2, dim=-1)
-        self.max_seq_len = new_max_len
         self.register_buffer("cos", emb.cos()[None, None, :, :])
         self.register_buffer("sin", emb.sin()[None, None, :, :])
+        self.max_seq_len = new_max_len
+        print(f"[YaRN] Applied: {original_len} → {new_max_len} tokens (scale={s:.1f}, temp={self.attn_scale:.3f})")
 
     def forward(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
         # Индексирование кастомного буфера — basedpyright ошибочно видит Module вместо Tensor
         cos = self.cos[:, :, :seq_len, : x.shape[-1]]  # pyright: ignore[reportIndexIssue]
         sin = self.sin[:, :, :seq_len, : x.shape[-1]]  # pyright: ignore[reportIndexIssue]
+        
+        # Apply attention temperature scaling (YaRN)
+        if hasattr(self, 'attn_scale'):
+            cos = cos * self.attn_scale
+            sin = sin * self.attn_scale
+        
         x1, x2 = x[..., ::2], x[..., 1::2]
         rotated = torch.stack([-x2, x1], dim=-1).flatten(-2)
         return x * cos + rotated * sin
@@ -126,6 +160,10 @@ class DiffAttention(nn.Module):
             getattr(cfg, "rope_theta", 10000.0) or 10000.0,
         )
         self.register_buffer("lambda_val", torch.tensor(self.lambda_init))
+        self.v_res_scale = nn.Parameter(torch.zeros(1))
+        
+        # Value Residuals (Paper 2504.14795): learnable scale for V residual
+        self.v_res_scale = nn.Parameter(torch.zeros(1))
 
     def forward(
         self,
@@ -147,6 +185,9 @@ class DiffAttention(nn.Module):
         else:
             k = self.k_proj(x).view(B, T, H, D)
             v = self.v_proj(x).view(B, T, H, D)
+            v = v + self.v_res_scale * x.view(B, T, H, D)
+            # Value Residual: add scaled input to V (Paper 2504.14795)
+            v = v + self.v_res_scale * x.view(B, T, H, D)
 
         if self.cfg.use_qk_norm:
             q = self.q_norm(q)

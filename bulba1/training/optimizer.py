@@ -1,22 +1,14 @@
 import math
-
 import torch
 from torch.optim import Optimizer
 
-
 class MuonOptimizer(Optimizer):
-    """Muon optimizer with momentum, per-parameter RMS scaling, and compiled Newton-Schulz."""
-
     def __init__(
         self, params, lr=3e-4, weight_decay=0.1, momentum=0.95, nesterov=True, ns_steps=5, min_dim=2
     ):
         defaults = {
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "momentum": momentum,
-            "nesterov": nesterov,
-            "ns_steps": ns_steps,
-            "min_dim": min_dim,
+            "lr": lr, "weight_decay": weight_decay, "momentum": momentum,
+            "nesterov": nesterov, "ns_steps": ns_steps, "min_dim": min_dim,
         }
         super().__init__(params, defaults)
 
@@ -38,13 +30,10 @@ class MuonOptimizer(Optimizer):
             for p in group["params"]:
                 if p.grad is None:
                     continue
-
                 grad = p.grad
                 state = self.state[p]
-
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(grad)
-
                 buf = state["momentum_buffer"]
 
                 if nesterov and momentum > 0:
@@ -64,9 +53,7 @@ class MuonOptimizer(Optimizer):
 
                 if wd > 0:
                     p.mul_(1 - lr * wd)
-
                 p.add_(update, alpha=-lr)
-
         return loss
 
     @staticmethod
@@ -85,65 +72,57 @@ class MuonOptimizer(Optimizer):
             X = X.T
         return X.to(G.dtype)
 
-
 class CombinedOptimizer:
-    """Все 2D матрицы → Muon, остальное → AdamW (без 8-битных фолбэков)."""
-
     def __init__(self, model, cfg):
         muon_params = []
         adamw_params = []
-
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-
-            # Исключения: всё, что не обрабатывается Muon
+            
+            # FIX: Exclude 1D-like tensors, gates, and projections that are highly rectangular
             is_excluded = any(
-                pattern in name for pattern in ("embed", "head", "lm_", "bias", "norm", "A_log", "D")
+                pattern in name for pattern in (
+                    "embed", "head", "lm_", "bias", "norm", "A_log", "D",
+                    "gate", "g_out", "beta_proj", "proj", "score", "lambda_", "mix_weight"
+                )
             )
+            
             if p.dim() == 2 and min(p.size(0), p.size(1)) >= 2 and not is_excluded:
-                muon_params.append(p)
+                # FIX: Newton-Schulz is unstable on highly rectangular matrices.
+                # Only apply Muon to relatively square matrices.
+                r, c = p.shape
+                if max(r, c) / min(r, c) <= 5.0:
+                    muon_params.append(p)
+                else:
+                    adamw_params.append(p)
             else:
                 adamw_params.append(p)
 
         self.muon = (
             MuonOptimizer(
-                muon_params,
-                lr=cfg.learning_rate,
-                weight_decay=cfg.weight_decay,
-                momentum=cfg.muon_momentum,
-                nesterov=cfg.muon_nesterov,
-                ns_steps=cfg.muon_ns_steps,
-                min_dim=2,
+                muon_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay,
+                momentum=cfg.muon_momentum, nesterov=cfg.muon_nesterov,
+                ns_steps=cfg.muon_ns_steps, min_dim=2,
             )
-            if muon_params
-            else None
+            if muon_params else None
         )
-
         self.adamw = (
             torch.optim.AdamW(
-                adamw_params,
-                lr=cfg.learning_rate,
-                betas=(cfg.beta1, cfg.beta2),
-                eps=cfg.eps,
-                weight_decay=cfg.weight_decay,
+                adamw_params, lr=cfg.learning_rate, betas=(cfg.beta1, cfg.beta2),
+                eps=cfg.eps, weight_decay=cfg.weight_decay,
                 fused=True if torch.cuda.is_available() else False,
             )
-            if adamw_params
-            else None
+            if adamw_params else None
         )
 
     def zero_grad(self):
-        if self.muon is not None:
-            self.muon.zero_grad()
-        if self.adamw is not None:
-            self.adamw.zero_grad()
+        if self.muon is not None: self.muon.zero_grad()
+        if self.adamw is not None: self.adamw.zero_grad()
 
     def step(self):
-        if self.muon is not None:
-            self.muon.step()
-        if self.adamw is not None:
-            self.adamw.step()
+        if self.muon is not None: self.muon.step()
+        if self.adamw is not None: self.adamw.step()
 
     def state_dict(self):
         return {
@@ -152,18 +131,12 @@ class CombinedOptimizer:
         }
 
     def load_state_dict(self, state_dict):
-        if self.muon and state_dict.get("muon"):
-            self.muon.load_state_dict(state_dict["muon"])
-        if self.adamw and state_dict.get("adamw"):
-            self.adamw.load_state_dict(state_dict["adamw"])
+        if self.muon and state_dict.get("muon"): self.muon.load_state_dict(state_dict["muon"])
+        if self.adamw and state_dict.get("adamw"): self.adamw.load_state_dict(state_dict["adamw"])
 
     @property
     def param_groups(self):
         groups = []
-        if self.muon is not None:
-            groups.extend(self.muon.param_groups)
-        if self.adamw is not None:
-            groups.extend(self.adamw.param_groups)
+        if self.muon is not None: groups.extend(self.muon.param_groups)
+        if self.adamw is not None: groups.extend(self.adamw.param_groups)
         return groups
-
-

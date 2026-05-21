@@ -163,7 +163,7 @@ def preflight_memory_test(model, cfg, device, max_attempts: int = 3) -> dict:
 
         dummy_input = torch.randint(
             0,
-            cfg.vocab_size,
+            self.cfg.vocab_size,
             (batch_size, seq_len),
             device=device,
         )
@@ -201,9 +201,9 @@ def preflight_memory_test(model, cfg, device, max_attempts: int = 3) -> dict:
         return 0.0
 
     model.train()
-    batch_size = cfg.batch_size
+    batch_size = self.cfg.batch_size
     grad_accum = getattr(cfg, "grad_accum_steps", max(1, cfg.batch_size))
-    seq_len = cfg.seq_len
+    seq_len = self.cfg.seq_len
 
     for attempt in range(max_attempts):
         try:

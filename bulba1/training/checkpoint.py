@@ -24,7 +24,20 @@ class CheckpointManager:
     ):
         path = os.path.join(self.checkpoint_dir, f"checkpoint_step_{step}.safetensors")
         state_dict = model.state_dict()
-        save_file(state_dict, path)
+        
+        # Clone shared tensors to prevent safetensors saving failure
+        save_dict = {}
+        seen_storages = set()
+        for k, v in state_dict.items():
+            storage_ptr = v.untyped_storage().data_ptr() if hasattr(v, "untyped_storage") else None
+            if storage_ptr is not None:
+                if storage_ptr in seen_storages:
+                    v = v.clone()
+                else:
+                    seen_storages.add(storage_ptr)
+            save_dict[k] = v
+
+        save_file(save_dict, path)
 
         extras = self._extra_paths(path)
         torch.save(optimizer.state_dict(), extras["opt"])
@@ -42,7 +55,7 @@ class CheckpointManager:
 
         best_path = os.path.join(self.checkpoint_dir, "best.safetensors")
         if loss <= (self.checkpoints[0][1] if self.checkpoints else float("inf")):
-            save_file(state_dict, best_path)
+            save_file(save_dict, best_path)
             best_extras = self._extra_paths(best_path)
             torch.save(optimizer.state_dict(), best_extras["opt"])
             if ema is not None:

@@ -180,8 +180,8 @@ def test_training_loss_decreases():
             for accum_step in range(engine.grad_accum_steps):
                 batch = next(inf())
                 is_last = accum_step == engine.grad_accum_steps - 1
-                metrics = engine.train_step(batch, is_accum_last=is_last)
-            losses.append(metrics["loss"].item())
+                metrics = engine.train_step(batch, is_accum_last=is_last, step=step, total_steps=20)
+            losses.append(metrics["loss"])
 
         assert losses[-1] < losses[0], (
             f"Loss did not decrease: start={losses[0]:.4f} end={losses[-1]:.4f}"

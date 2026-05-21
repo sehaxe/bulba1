@@ -54,8 +54,8 @@ class AutoPilot:
         self.confidence = confidence
 
         self.total_steps = getattr(cfg, "total_steps", 25000)
-        self.base_lr = cfg.learning_rate
-        self.base_wd = cfg.weight_decay
+        self.base_lr = self.cfg.learning_rate
+        self.base_wd = self.cfg.weight_decay
         self.base_noise = getattr(cfg, "gradient_noise", 0.0)
         self.base_sd = getattr(cfg, "stochastic_depth_prob", 0.0)
 

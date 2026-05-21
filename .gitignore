@@ -10,36 +10,38 @@ wheels/
 venv/
 env/
 
-# Checkpoints (too large for git)
+# Checkpoints & Data (too large for GitHub)
 checkpoints/
 data/
 *.pt
 *.safetensors
+*.bin
 
 # Logs (runtime files)
 logs/
 *.log
 
-# Bot state
+# Backups & Scratch (junk)
+backups/
+scratch/
+outputs/
+*.bak
+
+# Bot state & secrets
 events.json
 desired_config.json
-
-# Telegram bot secrets (NOT in git)
 telegram_bot/bot_config.py
-!telegram_bot/bot_configpy.example
+!telegram_bot/bot_config.py.example
 
-# Images
+# Images & Plots
 *.png
+plots/
 
-# IDE
+# IDE & OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Benchmark
+# Benchmark & Misc
 benchmark_report.json
-
-*.lock

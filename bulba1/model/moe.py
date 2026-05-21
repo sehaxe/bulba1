@@ -130,7 +130,7 @@ class MoELayer(nn.Module):
             else:
                 out_k = self._forward_loop_single_pass(x_flat, expert_ids, weights)
 
-            output = output + out_k
+            output.add_(out_k)  # NASA Rule #2: In-place addition
 
         return output
 
